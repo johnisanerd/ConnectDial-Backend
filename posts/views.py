@@ -246,6 +246,12 @@ class PostViewSet(viewsets.ModelViewSet):
         kwargs = {
             'author': self.request.user,
             'post_type': post_type,
+            # ✅ Standard posts created via /api/posts/ are NEVER shorts.
+            # Short videos are uploaded exclusively via UploadShortScreen
+            # → POST /api/videos/shorts/upload/ → ShortVideo model.
+            # Force is_short=False here so even if the client accidentally
+            # sends is_short=true it cannot create a short via this endpoint.
+            'is_short': False,
         }
 
         if parent_id:
