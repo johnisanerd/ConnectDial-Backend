@@ -101,81 +101,60 @@ class ShortVideoUploadView(generics.CreateAPIView):
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
     def perform_create(self, serializer):
-        video_file      = self.request.FILES.get('video')
-        duration        = 0
-        tmp_path        = None
+        video_file = self.request.FILES.get('video')
+        duration = 0
+        tmp_path = None
         compressed_path = None
 
         try:
             if video_file:
-                # 1. Write uploaded file to temporary disk
+                # 1. Save original to temp
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
                     for chunk in video_file.chunks():
                         tmp.write(chunk)
                     tmp_path = tmp.name
 
-                # 2. Compress video with ffmpeg
+                # 2. Compress
                 compressed_path = tmp_path + '_compressed.mp4'
                 compress_video(tmp_path, compressed_path)
 
-                # 3. Extract duration from compressed file
                 duration = extract_duration(compressed_path)
 
-                # 4. Read compressed file and wrap as InMemoryUploadedFile
-                with open(compressed_path, 'rb') as cf:
-                    compressed_content = cf.read()
+                # 3. BETTER WAY: Use Django's File instead of InMemoryUploadedFile for GCS
+                with open(compressed_path, 'rb') as f:
+                    django_file = File(f, name=video_file.name)
 
-                compressed_file = InMemoryUploadedFile(
-                    file=io.BytesIO(compressed_content),
-                    field_name='video',
-                    name=video_file.name,
-                    content_type='video/mp4',
-                    size=len(compressed_content),
-                    charset=None,
-                )
-
-                # 5. Save via serializer (triggers validation again)
                 instance = serializer.save(
                     author=self.request.user,
                     duration=duration,
-                    video=compressed_file,
+                    video=django_file,          # ← Changed
                 )
 
-                # 6. Auto-generate thumbnail (non-fatal)
+                # 4. Thumbnail
                 if compressed_path and not instance.thumbnail:
                     try:
                         thumb_bytes = generate_thumbnail(compressed_path)
                         instance.thumbnail.save(
                             f'thumb_{instance.pk}.jpg',
                             ContentFile(thumb_bytes),
-                            save=True,
+                            save=True
                         )
-                    except Exception as thumb_exc:
-                        # Log in production if needed
-                        print(f"Thumbnail generation failed: {thumb_exc}")
+                    except Exception:
+                        pass
 
             else:
-                # No video file — metadata only
-                instance = serializer.save(
-                    author=self.request.user,
-                    duration=duration,
-                )
+                instance = serializer.save(author=self.request.user, duration=duration)
 
             return instance
 
-        except Exception as e:
-            # Cleanup temp files even on error
-            raise
         finally:
-            # Always clean up temporary files
             for path in (tmp_path, compressed_path):
                 if path and os.path.exists(path):
                     try:
                         os.unlink(path)
-                    except OSError:
-                        pass
-
-# ─────────────────────────────────────────────────────────────────────────────
+                    except:
+                        pass        
+    # ─────────────────────────────────────────────────────────────────────────────
 # FEED
 # ─────────────────────────────────────────────────────────────────────────────
 

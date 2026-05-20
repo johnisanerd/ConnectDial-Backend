@@ -57,8 +57,10 @@ class ShortVideo(models.Model):
         on_delete=models.CASCADE,
         related_name='short_videos',
     )
-
-    video     = models.FileField(upload_to=short_video_upload_path)
+    video = models.FileField(
+        upload_to=short_video_upload_path,
+        storage=storages.backends.gcloud.GoogleCloudStorage() if 'storages' in globals() else None
+    )
     thumbnail = models.ImageField(upload_to='shorts/thumbnails/', blank=True, null=True)
     caption   = models.TextField(blank=True, max_length=2200)
 
@@ -92,7 +94,7 @@ class ShortVideo(models.Model):
     cached_comments = models.PositiveIntegerField(default=0)
     cached_shares   = models.PositiveIntegerField(default=0)
     cached_views    = models.PositiveIntegerField(default=0)
-
+    
     # For better feed performance
     cached_avg_watch_ratio = models.FloatField(default=0.0)
 
