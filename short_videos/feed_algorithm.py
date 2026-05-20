@@ -1,11 +1,11 @@
 """
-ConnectDial — Short Video Feed Algorithm (Stable Version)
+ConnectDial — Short Video Feed Algorithm (Django Compatible Version)
 """
 
 from django.db.models import (
     F, ExpressionWrapper, FloatField, Case, When, Value, IntegerField
 )
-from django.db.models.functions import ExtractEpoch
+from django.db.models.functions import Extract   # ← Changed from ExtractEpoch
 from django.utils import timezone
 from django.core.cache import cache
 
@@ -53,7 +53,6 @@ def _user_interest_teams(user):
 
 
 def _user_history_leagues(user, limit=HISTORY_LIMIT):
-    """Safe history fetch"""
     try:
         return list(
             VideoView.objects
@@ -67,7 +66,6 @@ def _user_history_leagues(user, limit=HISTORY_LIMIT):
 
 
 def _user_history_teams(user, limit=HISTORY_LIMIT):
-    """Safe history fetch"""
     try:
         return list(
             VideoView.objects
@@ -81,7 +79,6 @@ def _user_history_teams(user, limit=HISTORY_LIMIT):
 
 
 def _preserve_order_list(ids: list):
-    """Rehydrate videos while preserving original order."""
     if not ids:
         return []
 
@@ -109,14 +106,13 @@ def _preserve_order_list(ids: list):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAIN FEED FUNCTION
+# MAIN FEED
 # ─────────────────────────────────────────────────────────────────────────────
 def get_short_video_feed(user, bypass_cache: bool = False):
     """Returns ordered list of ShortVideo objects for the feed."""
     try:
         cache_key = _cache_key(user.pk)
 
-        # Cache hit
         if not bypass_cache:
             cached_ids = cache.get(cache_key)
             if cached_ids:
@@ -139,8 +135,13 @@ def get_short_video_feed(user, bypass_cache: bool = False):
             comments_count=F('cached_comments'),
             shares_count=F('cached_shares'),
             watch_ratio=F('cached_avg_watch_ratio'),
+            # Fixed age calculation for older Django
+            age_seconds=ExpressionWrapper(
+                Extract(timezone.now() - F('created_at'), 'epoch'),
+                output_field=FloatField(),
+            ),
             age_hours=ExpressionWrapper(
-                ExtractEpoch(timezone.now() - F('created_at')) / 3600.0,
+                Extract(timezone.now() - F('created_at'), 'epoch') / 3600.0,
                 output_field=FloatField(),
             ),
         )
@@ -197,10 +198,8 @@ def get_short_video_feed(user, bypass_cache: bool = False):
             )
         ).order_by('-score')
 
-        # Execute query
         result = list(qs[:FEED_FETCH_SIZE])
 
-        # Cache the IDs
         cache.set(cache_key, [str(v.id) for v in result], CACHE_TTL)
 
         return result
