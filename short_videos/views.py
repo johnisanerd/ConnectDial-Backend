@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 # ── Django ────────────────────────────────────────────────────────────────────
 from django.contrib.auth import get_user_model
+from django.core.files import File
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import InMemoryUploadedFile
 from django.shortcuts import get_object_or_404
@@ -101,7 +102,19 @@ class ShortVideoUploadView(generics.CreateAPIView):
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
     def perform_create(self, serializer):
-        video_file = self.request.FILES.get('video')
+        # Frontend sends the file as 'file', not 'video'
+        video_file = self.request.FILES.get('file') or self.request.FILES.get('video')
+
+        # Frontend sends league_id; resolve it to a League instance
+        league = None
+        league_id = self.request.data.get('league_id') or self.request.data.get('league')
+        if league_id:
+            from leagues.models import League
+            try:
+                league = League.objects.get(pk=league_id)
+            except League.DoesNotExist:
+                pass
+
         duration = 0
         tmp_path = None
         compressed_path = None
@@ -120,15 +133,18 @@ class ShortVideoUploadView(generics.CreateAPIView):
 
                 duration = extract_duration(compressed_path)
 
-                # 3. BETTER WAY: Use Django's File instead of InMemoryUploadedFile for GCS
-                with open(compressed_path, 'rb') as f:
+                # 3. Keep the file open while Django/GCS streams it
+                f = open(compressed_path, 'rb')
+                try:
                     django_file = File(f, name=video_file.name)
-
-                instance = serializer.save(
-                    author=self.request.user,
-                    duration=duration,
-                    video=django_file,          # ← Changed
-                )
+                    instance = serializer.save(
+                        author=self.request.user,
+                        duration=duration,
+                        video=django_file,
+                        league=league,
+                    )
+                finally:
+                    f.close()
 
                 # 4. Thumbnail
                 if compressed_path and not instance.thumbnail:
@@ -137,13 +153,17 @@ class ShortVideoUploadView(generics.CreateAPIView):
                         instance.thumbnail.save(
                             f'thumb_{instance.pk}.jpg',
                             ContentFile(thumb_bytes),
-                            save=True
+                            save=True,
                         )
                     except Exception:
                         pass
 
             else:
-                instance = serializer.save(author=self.request.user, duration=duration)
+                instance = serializer.save(
+                    author=self.request.user,
+                    duration=duration,
+                    league=league,
+                )
 
             return instance
 
@@ -152,7 +172,7 @@ class ShortVideoUploadView(generics.CreateAPIView):
                 if path and os.path.exists(path):
                     try:
                         os.unlink(path)
-                    except:
+                    except Exception:
                         pass        
     # ─────────────────────────────────────────────────────────────────────────────
 # FEED

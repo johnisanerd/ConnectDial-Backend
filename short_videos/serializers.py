@@ -234,12 +234,23 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
     Write serializer for ShortVideoUploadView.
 
     FIX-1: video field is writable so compressed file goes through proper validation.
+    FIX-3: also accept 'file' as the upload field name (what the React Native frontend sends).
     """
     video = serializers.FileField(required=False)
+    # Accept 'file' as an alias — the RN frontend appends the video as 'file'
+    file  = serializers.FileField(required=False, write_only=True)
 
     class Meta:
         model  = ShortVideo
-        fields = ['caption', 'league', 'team', 'video']
+        fields = ['caption', 'league', 'team', 'video', 'file']
+
+    def validate(self, attrs):
+        # If frontend sent 'file', treat it as 'video'
+        if 'file' in attrs and not attrs.get('video'):
+            attrs['video'] = attrs.pop('file')
+        else:
+            attrs.pop('file', None)
+        return attrs
 
     def validate_video(self, value):
         if not value:
