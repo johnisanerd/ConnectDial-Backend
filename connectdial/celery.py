@@ -13,3 +13,5 @@ app.autodiscover_tasks()
 
 # 🚀 ADD THIS TO FORCE DISCOVERY IF AUTODISCOVER FAILS
 # app.autodiscover_tasks(['notifications', 'posts'])
+# connectdial/celery.py
+app.autodiscover_tasks(['notifications', 'posts', 'short_videos'])  # ← add short_videos

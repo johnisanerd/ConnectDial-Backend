@@ -19,6 +19,7 @@ Streaming
 import io
 import os
 import tempfile
+import threading
 from urllib.parse import quote
 
 # ── Django ────────────────────────────────────────────────────────────────────
@@ -103,6 +104,8 @@ class ShortVideoUploadView(generics.CreateAPIView):
                 )
             raise
 
+        # Refresh so we get the latest status (may have been updated by sync path)
+        instance.refresh_from_db()
         read_serializer = ShortVideoSerializer(instance, context={'request': request})
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -142,32 +145,46 @@ class ShortVideoUploadView(generics.CreateAPIView):
             status='draft',     # will flip to 'published' after processing
         )
 
-        # ── 5. Hand off to Celery — returns immediately ────────────────────────
+        # ── 5. Save raw file directly (no compression) — publish immediately ─────
+        #    Compression happens async in Celery if available.
+        #    Without Celery we still publish instantly so the client never times out.
         if tmp_path:
+            celery_dispatched = False
             try:
                 from .tasks import process_short_video
                 process_short_video.delay(str(instance.pk), tmp_path)
+                celery_dispatched = True
             except Exception:
-                # Celery unavailable? Fall back to synchronous processing.
-                self._process_sync(instance, tmp_path)
+                pass
+
+            if not celery_dispatched:
+                # No Celery — run in a background thread so the HTTP response
+                # returns to the mobile client immediately (avoids 30s timeout).
+                t = threading.Thread(
+                    target=self._save_raw_and_publish,
+                    args=(instance, tmp_path),
+                    daemon=True,
+                )
+                t.start()
 
         return instance
 
-    # ── Synchronous fallback (used when Celery is not configured) ─────────────
-    def _process_sync(self, instance, tmp_path):
-        compressed_path = tmp_path + '_compressed.mp4'
+    def _save_raw_and_publish(self, instance, tmp_path):
+        """
+        Upload the raw (uncompressed) video file and publish immediately.
+        No ffmpeg — this must complete fast enough not to block the response.
+        The raw file is already on disk; we just stream it to GCS and save.
+        """
         try:
-            compress_video(tmp_path, compressed_path)
-            duration = extract_duration(compressed_path)
+            from django.core.files import File as DjangoFile
 
-            f = open(compressed_path, 'rb')
+            # Extract duration without compressing (reads metadata only, fast)
+            duration = extract_duration(tmp_path)
+
+            fname = os.path.basename(tmp_path)
+            f = open(tmp_path, 'rb')
             try:
-                from django.core.files import File as DjangoFile
-                instance.video.save(
-                    os.path.basename(compressed_path),
-                    DjangoFile(f),
-                    save=False,
-                )
+                instance.video.save(fname, DjangoFile(f), save=False)
             finally:
                 f.close()
 
@@ -175,8 +192,9 @@ class ShortVideoUploadView(generics.CreateAPIView):
             instance.status   = 'published'
             instance.save(update_fields=['video', 'duration', 'status'])
 
+            # Generate thumbnail (fast — just grabs 1 frame)
             try:
-                thumb_bytes = generate_thumbnail(compressed_path)
+                thumb_bytes = generate_thumbnail(tmp_path)
                 instance.thumbnail.save(
                     f'thumb_{instance.pk}.jpg',
                     ContentFile(thumb_bytes),
@@ -184,16 +202,17 @@ class ShortVideoUploadView(generics.CreateAPIView):
                 )
             except Exception:
                 pass
+
         except Exception:
-            instance.status = 'published'   # publish even if compression fails
+            # Even if GCS upload fails, flip to published so it's not stuck
+            instance.status = 'published'
             instance.save(update_fields=['status'])
         finally:
-            for path in (tmp_path, compressed_path):
-                if path and os.path.exists(path):
-                    try:
-                        os.unlink(path)
-                    except Exception:
-                        pass        
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass        
     # ─────────────────────────────────────────────────────────────────────────────
 # FEED
 # ─────────────────────────────────────────────────────────────────────────────
