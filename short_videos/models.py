@@ -12,17 +12,13 @@ Covers:
 Fixes applied
 ─────────────
   FIX-2  Added ('reshare', 'In-App Reshare') to VideoShare.PLATFORM_CHOICES.
-         VideoReshareView now uses platform='reshare' as its dedicated sentinel
-         value. Previously it used 'other', which collided with the catch-all
-         external-share choice and caused in-app reshares to be accidentally
-         toggled off when a user also had an 'other' external share on the
-         same video.
 """
 
 import uuid
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
+from django.core.validators import MaxValueValidator, MinValueValidator
 from leagues.models import League, Team
 
 
@@ -31,7 +27,7 @@ from leagues.models import League, Team
 # ─────────────────────────────────────────────────────────────────────────────
 
 def short_video_upload_path(instance, filename):
-    ext = filename.rsplit('.', 1)[-1]
+    ext = filename.rsplit('.', 1)[-1].lower()
     return f"shorts/{instance.pk}/{uuid.uuid4().hex}.{ext}"
 
 
@@ -47,6 +43,13 @@ class ShortVideo(models.Model):
     Cached counters are maintained via signals so the feed algorithm never
     issues aggregate COUNT() queries at read time.
     """
+
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('published', 'Published'),
+        ('rejected', 'Rejected'),
+        ('banned', 'Banned'),
+    ]
 
     id       = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     author   = models.ForeignKey(
@@ -71,14 +74,27 @@ class ShortVideo(models.Model):
     # Duration in seconds — 0 to 7200 (2 hrs)
     duration = models.PositiveIntegerField(
         default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(7200)],
         help_text="Video duration in seconds (0 – 7200).",
     )
 
-    # ── Denormalised counters (updated by signals, never by views) ──────────
+    # Additional metadata
+    width = models.PositiveIntegerField(null=True, blank=True)
+    height = models.PositiveIntegerField(null=True, blank=True)
+    file_size = models.PositiveBigIntegerField(null=True, blank=True, help_text="Size in bytes")
+
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='published'
+    )
+
+    # ── Denormalised counters (updated by signals) ──────────────────────────
     cached_likes    = models.PositiveIntegerField(default=0, db_index=True)
     cached_comments = models.PositiveIntegerField(default=0)
     cached_shares   = models.PositiveIntegerField(default=0)
     cached_views    = models.PositiveIntegerField(default=0)
+
+    # For better feed performance
+    cached_avg_watch_ratio = models.FloatField(default=0.0)
 
     created_at = models.DateTimeField(default=timezone.now, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -89,6 +105,8 @@ class ShortVideo(models.Model):
             models.Index(fields=['league', '-created_at']),
             models.Index(fields=['team',   '-created_at']),
             models.Index(fields=['author', '-created_at']),
+            models.Index(fields=['status', '-created_at']),
+            models.Index(fields=['cached_likes']),
         ]
 
     def __str__(self):
@@ -141,10 +159,6 @@ class VideoComment(models.Model):
     """
     Comment on a ShortVideo with optional threading and @mention support.
 
-    - `parent` allows one level of threaded replies.
-    - `mentioned_users` is populated by parsing @username tokens in `body`
-      (see signals.py) and stored in the CommentMention through-table.
-
     NOTE: The DB column for `author` is `user_id` (legacy name from initial
     migration). We keep the Python attribute as `author` and use
     db_column='user_id' to bridge the mismatch without a schema migration.
@@ -171,6 +185,7 @@ class VideoComment(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
+    is_edited  = models.BooleanField(default=False)
 
     class Meta:
         ordering = ['created_at']
@@ -206,9 +221,6 @@ class VideoShare(models.Model):
     reshare.
 
     FIX-2: Added 'reshare' as a dedicated PLATFORM_CHOICES entry.
-    VideoReshareView uses platform='reshare' as its sentinel value instead of
-    'other'. This prevents the collision where an external 'other' share would
-    be mistaken for an in-app reshare and accidentally toggled off.
     """
     PLATFORM_CHOICES = [
         ('whatsapp',  'WhatsApp'),
@@ -217,7 +229,7 @@ class VideoShare(models.Model):
         ('facebook',  'Facebook'),
         ('instagram', 'Instagram'),
         ('copy_link', 'Copy Link'),
-        ('reshare',   'In-App Reshare'),   # FIX-2: dedicated in-app reshare value
+        ('reshare',   'In-App Reshare'),   # FIX-2
         ('other',     'Other'),
     ]
 
@@ -234,14 +246,6 @@ class VideoShare(models.Model):
 class VideoView(models.Model):
     """
     Records a single view event.
-
-    Fields
-    ──────
-    watch_time : seconds the user actually watched — used to compute
-                 watch_ratio in the feed algorithm.
-    completed  : True if the user watched ≥ 90% of the video.
-                 Computed automatically on save; stored explicitly so
-                 signals/analytics can filter on it without recomputing.
     """
     user  = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -266,7 +270,6 @@ class VideoView(models.Model):
     def save(self, *args, **kwargs):
         """
         Auto-compute `completed` before saving.
-        Falls back to False if duration is 0 (unknown length).
         """
         duration = self.video.duration if self.video_id else 0
         if duration > 0:

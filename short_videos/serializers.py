@@ -5,15 +5,7 @@ ConnectDial — Serializers
 Fixes applied
 ─────────────
   FIX-1  Added ShortVideoCreateSerializer — a dedicated write serializer for
-         ShortVideoUploadView. Previously the view passed `video=compressed_file`
-         as a raw kwarg to ShortVideoSerializer.save(), bypassing the serializer
-         field entirely. This meant:
-           - Storage-backend hooks (S3/GCS path generation, upload) did not run
-             through the serializer's validated_data pipeline.
-           - Any future per-field validation on `video` would be silently skipped.
-         ShortVideoCreateSerializer declares `video` as a writable FileField so
-         the compressed InMemoryUploadedFile goes through normal DRF validation
-         and the storage backend saves it correctly.
+         ShortVideoUploadView.
 """
 
 import re
@@ -75,8 +67,9 @@ class VideoCommentSerializer(serializers.ModelSerializer):
             'mentions',
             'reply_count',
             'created_at',
+            'is_edited',
         ]
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = ['id', 'created_at', 'is_edited']
 
     def get_author_avatar(self, obj):
         request = self.context.get('request')
@@ -101,9 +94,11 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
     def validate_body(self, value):
-        if not value.strip():
+        if not value or not value.strip():
             raise serializers.ValidationError("Comment body cannot be empty.")
-        return value
+        if len(value) > 1000:
+            raise serializers.ValidationError("Comment is too long (max 1000 characters).")
+        return value.strip()
 
     def validate_parent(self, value):
         if value and value.parent_id is not None:
@@ -114,7 +109,9 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        return super().create(validated_data)
+        comment = super().create(validated_data)
+        # Mark as edited will be handled in signals for updates
+        return comment
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,8 +121,7 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
 class ShortVideoSerializer(serializers.ModelSerializer):
     """
     Read serializer for ShortVideo — used for feed responses and the upload
-    response payload. All count fields come from denormalised cached_* columns.
-    This serializer is READ-ONLY; use ShortVideoCreateSerializer for writes.
+    response payload.
     """
     author_username  = serializers.CharField(source='author.username', read_only=True)
     author_avatar    = serializers.SerializerMethodField()
@@ -171,6 +167,7 @@ class ShortVideoSerializer(serializers.ModelSerializer):
             'og_title',
             'og_description',
             'created_at',
+            'status',
         ]
 
     def get_author_avatar(self, obj):
@@ -184,20 +181,11 @@ class ShortVideoSerializer(serializers.ModelSerializer):
         return None
 
     def get_video_url(self, obj):
-        """
-        Returns the streaming endpoint URL with the DRF token embedded as a
-        query parameter so react-native-video can authenticate without needing
-        a custom Authorization header on the src URL itself.
-
-        Format: /api/videos/shorts/<uuid>/stream/?token=<drf_token_key>
-        """
         request = self.context.get('request')
-        path    = f"/api/videos/shorts/{obj.pk}/stream/"
+        path = f"/api/videos/shorts/{obj.pk}/stream/"
 
         token = None
         if request and request.auth:
-            # TokenAuthentication sets request.auth to the Token model instance.
-            # .key is the raw token string stored in authtoken_token.key
             token = request.auth.key
 
         if token:
@@ -220,8 +208,7 @@ class ShortVideoSerializer(serializers.ModelSerializer):
     def get_is_liked(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
-            # Uses the prefetch_related('likes') cache from feed_algorithm.py
-            # so this does not issue a per-video query.
+            # Relies on prefetch_related('likes') from feed
             return obj.likes.filter(user=request.user).exists()
         return False
 
@@ -239,46 +226,49 @@ class ShortVideoSerializer(serializers.ModelSerializer):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SHORT VIDEO — WRITE  (FIX-1)
+# SHORT VIDEO — WRITE
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ShortVideoCreateSerializer(serializers.ModelSerializer):
     """
     Write serializer for ShortVideoUploadView.
 
-    FIX-1: Declares `video` as a writable FileField so the compressed
-    InMemoryUploadedFile is processed through validated_data and the storage
-    backend (local / S3 / GCS) handles the save correctly.
-
-    `author`, `duration`, and `video` are supplied by perform_create() as
-    kwargs to .save(), not from request data, so they are excluded from the
-    declared fields list (they cannot be set by the client directly).
-
-    Response: ShortVideoUploadView.create() builds a separate ShortVideoSerializer
-    instance for the response so the client receives the full read payload
-    (video_url, thumbnail_url, is_liked, etc.).
+    FIX-1: video field is writable so compressed file goes through proper validation.
     """
-    video = serializers.FileField(required=False)   # FIX-1: writable file field
+    video = serializers.FileField(required=False)
 
     class Meta:
         model  = ShortVideo
         fields = ['caption', 'league', 'team', 'video']
 
     def validate_video(self, value):
-        """
-        Basic MIME-type guard — reject obvious non-video uploads early.
-        ffmpeg will catch everything else during compression.
-        """
+        if not value:
+            return value
+
         content_type = getattr(value, 'content_type', '') or ''
+
+        # 1. Must be a video
         if content_type and not content_type.startswith('video/'):
             raise serializers.ValidationError(
                 f"Uploaded file must be a video. Received: {content_type}"
             )
+
+        # 2. Enforce 2GB maximum size
+        max_size_bytes = 2 * 1024 * 1024 * 1024  # 2GB
+        if value.size > max_size_bytes:
+            size_gb = value.size / (1024 * 1024 * 1024)
+            raise serializers.ValidationError(
+                f"Video file is too large ({size_gb:.2f} GB). Maximum allowed size is 2 GB."
+            )
+
+        # 3. Optional: Soft warning for large files (can be logged)
+        if value.size > 500 * 1024 * 1024:   # > 500MB
+            # You can add logging here if desired
+            pass
+
         return value
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# ENGAGEMENT (write)
+# ENGAGEMENT
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoLikeSerializer(serializers.ModelSerializer):
@@ -304,12 +294,6 @@ class VideoShareSerializer(serializers.ModelSerializer):
 
 
 class VideoViewSerializer(serializers.ModelSerializer):
-    """
-    Posted by the client when the player reports a watch-time update.
-    `watch_time`  : total seconds watched (float), max 7200 (2 hrs).
-    `completed`   : read-only — computed in VideoView.save() from
-                    watch_time vs video duration. Never sent by the client.
-    """
     completed = serializers.BooleanField(read_only=True)
 
     class Meta:
@@ -321,7 +305,5 @@ class VideoViewSerializer(serializers.ModelSerializer):
         if value < 0:
             raise serializers.ValidationError("watch_time cannot be negative.")
         if value > 7200:
-            raise serializers.ValidationError(
-                "watch_time cannot exceed 7200 seconds (2 hrs)."
-            )
+            raise serializers.ValidationError("watch_time cannot exceed 7200 seconds (2 hrs).")
         return value

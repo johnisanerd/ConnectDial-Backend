@@ -1,41 +1,5 @@
 """
 Streaming utilities for ConnectDial short videos.
-
-Supports HTTP Range requests so the mobile player can:
-  • Seek without re-downloading
-  • Start playing before the full file is downloaded (progressive playback)
-  • Resume after network interruptions
-
-Storage backend compatibility
-──────────────────────────────
-video_file.path  works ONLY with Django's local FileSystemStorage.
-video_file.url   works with ANY backend (local, S3, GCS, Azure, etc.)
-
-This module uses .url for all cases:
-  - If the URL is an S3/GCS presigned URL → redirect directly (no proxying)
-  - If the URL is a local MEDIA_URL path  → serve with Range support (dev only)
-
-Usage in views:
-    return stream_video_response(request, video)
-
-Fixes applied
-─────────────
-  FIX-9  build_telegram_share_text() had an operator-precedence bug in the
-         caption truncation line:
-
-           caption = video.caption[:100] + "…" if len(video.caption) > 100 else video.caption
-
-         Due to Python's precedence rules this parsed as:
-
-           caption = (video.caption[:100]) + ("…" if len > 100 else video.caption)
-
-         So when caption was ≤ 100 chars, Python evaluated the ternary as
-         video.caption and appended the ENTIRE caption to the already-sliced
-         string — doubling the caption text.
-
-         Fixed by adding explicit parentheses:
-
-           caption = (video.caption[:100] + "…") if len(video.caption) > 100 else video.caption
 """
 
 import os
@@ -46,59 +10,42 @@ from django.http import StreamingHttpResponse, HttpResponseRedirect
 from django.conf import settings
 
 
-CHUNK_SIZE = 1024 * 512  # 512 KB chunks
+CHUNK_SIZE = 1024 * 512  # 512 KB
 
 
 def _is_external_url(url: str) -> bool:
-    """
-    Returns True if the URL points to an external host (S3, GCS, CDN, etc.)
-    rather than our own Django server.
-    """
     parsed = urlparse(url)
     return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
 
 
 def stream_video_response(request, video_instance):
-    """
-    Returns a streaming response for the video file.
-
-    Strategy
-    ────────
-    1. Get the file URL via video_file.url — works with any storage backend.
-    2. External URL (S3 presigned, GCS signed, CDN) → redirect.
-       The mobile player follows the redirect and streams directly from the
-       CDN — no proxying through Django.
-    3. Local MEDIA_URL path → resolve to an absolute filesystem path using
-       MEDIA_ROOT and serve with Range support (dev mode).
-    """
     video_file = video_instance.video
 
     if not video_file or not video_file.name:
         from rest_framework.response import Response
         from rest_framework import status
         return Response(
-            {'detail': 'No video file attached to this record.'},
+            {'detail': 'No video file attached.'},
             status=status.HTTP_404_NOT_FOUND,
         )
 
     file_url = video_file.url
 
-    # ── External storage (S3, GCS, Azure, CDN) ───────────────────────────────
+    # External storage (S3, GCS, CDN, etc.)
     if _is_external_url(file_url):
         return HttpResponseRedirect(file_url)
 
-    # ── Local / dev storage (FileSystemStorage) ───────────────────────────────
+    # Local development serving
     media_root = getattr(settings, 'MEDIA_ROOT', '')
     if not media_root:
         from rest_framework.response import Response
         from rest_framework import status
         return Response(
-            {'detail': 'MEDIA_ROOT is not configured. Cannot serve local video files.'},
+            {'detail': 'MEDIA_ROOT is not configured.'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    relative_path = video_file.name   # e.g. "shorts/uuid/abc.mp4"
-    file_path     = os.path.join(media_root, relative_path)
+    file_path = os.path.join(media_root, video_file.name)
 
     if not os.path.exists(file_path):
         from rest_framework.response import Response
@@ -108,19 +55,18 @@ def stream_video_response(request, video_instance):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    file_size    = os.path.getsize(file_path)
+    file_size = os.path.getsize(file_path)
     content_type, _ = mimetypes.guess_type(file_path)
     content_type = content_type or 'video/mp4'
 
     range_header = request.META.get('HTTP_RANGE', '').strip()
 
     if range_header:
-        # Parse "bytes=start-end"
         byte_range = range_header.replace('bytes=', '')
         start_str, _, end_str = byte_range.partition('-')
         start = int(start_str) if start_str else 0
-        end   = int(end_str)   if end_str   else file_size - 1
-        end   = min(end, file_size - 1)
+        end = int(end_str) if end_str else file_size - 1
+        end = min(end, file_size - 1)
         length = end - start + 1
 
         def file_iterator(path, offset, read_len, chunk=CHUNK_SIZE):
@@ -140,12 +86,12 @@ def stream_video_response(request, video_instance):
             content_type=content_type,
         )
         response['Content-Length'] = str(length)
-        response['Content-Range']  = f'bytes {start}-{end}/{file_size}'
-        response['Accept-Ranges']  = 'bytes'
-        response['Cache-Control']  = 'public, max-age=86400'
+        response['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+        response['Accept-Ranges'] = 'bytes'
+        response['Cache-Control'] = 'public, max-age=86400'
         return response
 
-    # Full file (no Range header)
+    # Full file
     def full_iterator(path, chunk=CHUNK_SIZE):
         with open(path, 'rb') as f:
             while True:
@@ -156,22 +102,12 @@ def stream_video_response(request, video_instance):
 
     response = StreamingHttpResponse(full_iterator(file_path), content_type=content_type)
     response['Content-Length'] = str(file_size)
-    response['Accept-Ranges']  = 'bytes'
-    response['Cache-Control']  = 'public, max-age=86400'
+    response['Accept-Ranges'] = 'bytes'
+    response['Cache-Control'] = 'public, max-age=86400'
     return response
 
 
 def build_whatsapp_share_text(video) -> str:
-    """
-    WhatsApp / Telegram plain-text share preview.
-
-    Message format:
-        🎬 [Video] ConnectDial
-        👤 @username
-        🏆 Champions League • Chelsea FC
-        📝 Caption truncated here...
-        ▶️ Watch: https://connectdial.com/shorts/uuid/
-    """
     lines = [
         "🎬 *[Video]* ConnectDial",
         f"👤 @{video.author.username}",
@@ -179,38 +115,24 @@ def build_whatsapp_share_text(video) -> str:
     if video.league or video.team:
         ctx = " • ".join(filter(None, [
             video.league.name if video.league else None,
-            video.team.name   if video.team   else None,
+            video.team.name if video.team else None,
         ]))
         lines.append(f"🏆 {ctx}")
+
     if video.caption:
-        # Correct truncation — parentheses ensure the ternary wraps both sides
         caption = (video.caption[:120] + "…") if len(video.caption) > 120 else video.caption
         lines.append(f"📝 {caption}")
+
     lines.append(f"▶️ Watch: {video.share_url}")
     return "\n".join(lines)
 
 
 def build_telegram_share_text(video) -> str:
-    """
-    Telegram share text in HTML mode — includes bold/links.
-
-    FIX-9: Caption truncation now uses correct parenthesisation.
-
-    Old (broken):
-        caption = video.caption[:100] + "…" if len(video.caption) > 100 else video.caption
-        # Parsed as: (video.caption[:100]) + ("…" if len > 100 else video.caption)
-        # When caption ≤ 100 chars: appended the full caption to the sliced
-        # prefix, producing a doubled/malformed string.
-
-    Fixed:
-        caption = (video.caption[:100] + "…") if len(video.caption) > 100 else video.caption
-    """
     league_team = " | ".join(filter(None, [
         video.league.name if video.league else None,
-        video.team.name   if video.team   else None,
+        video.team.name if video.team else None,
     ]))
 
-    # FIX-9: explicit parentheses around the truncation expression
     caption = (video.caption[:100] + "…") if len(video.caption) > 100 else video.caption
 
     text = (
