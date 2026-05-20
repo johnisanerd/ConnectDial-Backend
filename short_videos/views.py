@@ -74,8 +74,16 @@ User = get_user_model()
 class ShortVideoUploadView(generics.CreateAPIView):
     """
     POST /api/videos/shorts/upload/
-    
-    Accepts multipart/form-data with 'video' file (max 2GB).
+
+    Strategy to beat the 30-second mobile timeout:
+      1. Save the raw video to a temp file on disk immediately.
+      2. Create the ShortVideo DB row with status='draft' right away.
+      3. Return 201 to the client instantly (< 1 s).
+      4. Fire a Celery task that compresses, extracts duration,
+         generates thumbnail, uploads to GCS, then flips status → 'published'.
+
+    The frontend should poll GET /api/videos/shorts/<pk>/status/ or rely on
+    a push notification to know when the video is ready.
     """
     serializer_class   = ShortVideoCreateSerializer
     permission_classes = [IsAuthenticated]
@@ -84,28 +92,25 @@ class ShortVideoUploadView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        
+
         try:
             instance = self.perform_create(serializer)
         except Exception as exc:
-            # Catch and return clean error messages (especially for large files)
             if "too large" in str(exc).lower() or "2gb" in str(exc).lower():
                 return Response(
                     {"video": ["Video file is too large. Maximum allowed size is 2 GB."]},
-                    status=status.HTTP_400_BAD_REQUEST
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
-            raise  # Re-raise other unexpected errors
+            raise
 
-        read_serializer = ShortVideoSerializer(
-            instance, context={'request': request}
-        )
+        read_serializer = ShortVideoSerializer(instance, context={'request': request})
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
     def perform_create(self, serializer):
-        # Frontend sends the file as 'file', not 'video'
+        # ── 1. Resolve uploaded file (frontend sends as 'file') ───────────────
         video_file = self.request.FILES.get('file') or self.request.FILES.get('video')
 
-        # Frontend sends league_id; resolve it to a League instance
+        # ── 2. Resolve league ──────────────────────────────────────────────────
         league = None
         league_id = self.request.data.get('league_id') or self.request.data.get('league')
         if league_id:
@@ -115,58 +120,73 @@ class ShortVideoUploadView(generics.CreateAPIView):
             except League.DoesNotExist:
                 pass
 
-        duration = 0
+        # ── 3. Save raw file to a persistent temp path ─────────────────────────
+        #    Do NOT use delete=True — the Celery worker needs to read it later.
         tmp_path = None
-        compressed_path = None
+        if video_file:
+            suffix = os.path.splitext(video_file.name or '')[-1] or '.mp4'
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=suffix,
+                dir=tempfile.gettempdir(),
+            ) as tmp:
+                for chunk in video_file.chunks():
+                    tmp.write(chunk)
+                tmp_path = tmp.name
 
+        # ── 4. Create DB row instantly with status='draft' ────────────────────
+        instance = serializer.save(
+            author=self.request.user,
+            duration=0,
+            league=league,
+            status='draft',     # will flip to 'published' after processing
+        )
+
+        # ── 5. Hand off to Celery — returns immediately ────────────────────────
+        if tmp_path:
+            try:
+                from .tasks import process_short_video
+                process_short_video.delay(str(instance.pk), tmp_path)
+            except Exception:
+                # Celery unavailable? Fall back to synchronous processing.
+                self._process_sync(instance, tmp_path)
+
+        return instance
+
+    # ── Synchronous fallback (used when Celery is not configured) ─────────────
+    def _process_sync(self, instance, tmp_path):
+        compressed_path = tmp_path + '_compressed.mp4'
         try:
-            if video_file:
-                # 1. Save original to temp
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
-                    for chunk in video_file.chunks():
-                        tmp.write(chunk)
-                    tmp_path = tmp.name
+            compress_video(tmp_path, compressed_path)
+            duration = extract_duration(compressed_path)
 
-                # 2. Compress
-                compressed_path = tmp_path + '_compressed.mp4'
-                compress_video(tmp_path, compressed_path)
-
-                duration = extract_duration(compressed_path)
-
-                # 3. Keep the file open while Django/GCS streams it
-                f = open(compressed_path, 'rb')
-                try:
-                    django_file = File(f, name=video_file.name)
-                    instance = serializer.save(
-                        author=self.request.user,
-                        duration=duration,
-                        video=django_file,
-                        league=league,
-                    )
-                finally:
-                    f.close()
-
-                # 4. Thumbnail
-                if compressed_path and not instance.thumbnail:
-                    try:
-                        thumb_bytes = generate_thumbnail(compressed_path)
-                        instance.thumbnail.save(
-                            f'thumb_{instance.pk}.jpg',
-                            ContentFile(thumb_bytes),
-                            save=True,
-                        )
-                    except Exception:
-                        pass
-
-            else:
-                instance = serializer.save(
-                    author=self.request.user,
-                    duration=duration,
-                    league=league,
+            f = open(compressed_path, 'rb')
+            try:
+                from django.core.files import File as DjangoFile
+                instance.video.save(
+                    os.path.basename(compressed_path),
+                    DjangoFile(f),
+                    save=False,
                 )
+            finally:
+                f.close()
 
-            return instance
+            instance.duration = duration
+            instance.status   = 'published'
+            instance.save(update_fields=['video', 'duration', 'status'])
 
+            try:
+                thumb_bytes = generate_thumbnail(compressed_path)
+                instance.thumbnail.save(
+                    f'thumb_{instance.pk}.jpg',
+                    ContentFile(thumb_bytes),
+                    save=True,
+                )
+            except Exception:
+                pass
+        except Exception:
+            instance.status = 'published'   # publish even if compression fails
+            instance.save(update_fields=['status'])
         finally:
             for path in (tmp_path, compressed_path):
                 if path and os.path.exists(path):
