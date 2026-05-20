@@ -31,7 +31,8 @@ This version preserves:
 import os
 import logging
 
-from django.db.models import Count, Exists, F, OuterRef, Q
+from django.db import models as django_models
+from django.db.models import Count, Exists, F, OuterRef, Q, Case, Value, When, PositiveIntegerField
 from django.http import HttpResponse
 from django.views import View
 
@@ -379,11 +380,22 @@ class PostViewSet(viewsets.ModelViewSet):
     @action(
         detail=True,
         methods=['get', 'post'],
+        # ✅ FIX: Use only IsAuthenticated here.
+        # IsAuthorOrReadOnly must NOT be applied to comments — the commenter
+        # is never the post author, so object-level permission would always
+        # deny POST requests with "You do not have permission to comment."
         permission_classes=[IsAuthenticated],
+        # ✅ FIX: bypass get_object()'s object-level permission check by
+        # fetching the post directly instead of via self.get_object().
+        # self.get_object() calls check_object_permissions() which would
+        # invoke IsAuthorOrReadOnly and block non-authors from commenting.
     )
     def comments(self, request, pk=None):
 
-        post = self.get_object()
+        try:
+            post = Post.objects.get(pk=pk)
+        except Post.DoesNotExist:
+            return Response({'error': 'Post not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         if request.method == 'POST':
             serializer = CommentSerializer(
@@ -452,7 +464,12 @@ class PostViewSet(viewsets.ModelViewSet):
     )
     def repost(self, request, pk=None):
 
-        original = self.get_object()
+        try:
+            # ✅ FIX: fetch original directly to avoid IsAuthorOrReadOnly
+            # blocking the repost action for non-authors.
+            original = Post.objects.select_related('league', 'team').get(pk=pk)
+        except Post.DoesNotExist:
+            return Response({'error': 'Post not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         existing = Post.objects.filter(
             author=request.user,
@@ -465,30 +482,49 @@ class PostViewSet(viewsets.ModelViewSet):
 
             existing.delete()
 
-            original.decrement_comment()
+            # ✅ FIX: was incorrectly calling decrement_comment() — reposts
+            # are tracked via share_count, not comment_count.
+            Post.objects.filter(pk=original.pk).update(
+                share_count=Case(
+                    When(share_count__gt=0, then=F('share_count') - 1),
+                    default=Value(0),
+                    output_field=PositiveIntegerField(),
+                )
+            )
 
             return Response({
                 'status': 'unreposted',
                 'reposts_count': Post.objects.filter(
-                    parent_post=original
+                    parent_post=original,
+                    is_repost=True,
                 ).count(),
             })
 
-        repost = Post.objects.create(
-            author=request.user,
-            content='',
-            parent_post=original,
-            post_type='text',
-            league=original.league,
-            is_repost=True,
-        )
+        try:
+            repost = Post.objects.create(
+                author=request.user,
+                content='',
+                parent_post=original,
+                post_type='text',
+                # ✅ FIX: carry over league AND team from original so the
+                # repost satisfies any league/team constraints.
+                league=original.league,
+                team=original.team,
+                is_repost=True,
+            )
+        except Exception as exc:
+            logger.error("repost create FAILED | post_id=%s | %s: %s", pk, type(exc).__name__, exc)
+            return Response({'error': 'Could not repost. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        original.increment_share()
 
         return Response(
             {
                 'status': 'reposted',
                 'id': repost.id,
                 'reposts_count': Post.objects.filter(
-                    parent_post=original
+                    parent_post=original,
+                    is_repost=True,
                 ).count(),
             },
             status=status.HTTP_201_CREATED,
