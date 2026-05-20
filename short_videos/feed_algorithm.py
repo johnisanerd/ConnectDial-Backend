@@ -40,6 +40,7 @@ def _cache_key(user_id: int) -> str:
 
 
 def bust_feed_cache(user_id: int) -> None:
+    """Bust feed cache for a specific user."""
     cache.delete(_cache_key(user_id))
 
 
@@ -80,6 +81,7 @@ def _user_history_teams(user, limit=HISTORY_LIMIT):
 
 
 def _preserve_order_list(ids: list):
+    """Rehydrate videos while preserving original order."""
     if not ids:
         return []
 
@@ -107,13 +109,14 @@ def _preserve_order_list(ids: list):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAIN FEED
+# MAIN FEED FUNCTION
 # ─────────────────────────────────────────────────────────────────────────────
 def get_short_video_feed(user, bypass_cache: bool = False):
-    """Returns ordered list of ShortVideo objects"""
+    """Returns ordered list of ShortVideo objects for the feed."""
     try:
         cache_key = _cache_key(user.pk)
 
+        # Cache hit
         if not bypass_cache:
             cached_ids = cache.get(cache_key)
             if cached_ids:
@@ -175,8 +178,10 @@ def get_short_video_feed(user, bypass_cache: bool = False):
         )
 
         qs = qs.annotate(
-            interest_boost=F('explicit_league_boost') + F('explicit_team_boost') +
-                          F('history_league_boost') + F('history_team_boost')
+            interest_boost=F('explicit_league_boost') + 
+                          F('explicit_team_boost') + 
+                          F('history_league_boost') + 
+                          F('history_team_boost')
         )
 
         # Final score
@@ -192,18 +197,18 @@ def get_short_video_feed(user, bypass_cache: bool = False):
             )
         ).order_by('-score')
 
+        # Execute query
         result = list(qs[:FEED_FETCH_SIZE])
 
-        # Cache IDs
+        # Cache the IDs
         cache.set(cache_key, [str(v.id) for v in result], CACHE_TTL)
 
         return result
 
     except Exception as e:
-        # ← Very important for debugging
         print(f"[FEED ERROR] {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         
-        # Return something safe so app doesn't break completely
-        return list(ShortVideo.objects.filter(status='published')[:30])vide
+        # Safe fallback
+        return list(ShortVideo.objects.filter(status='published')[:30])
