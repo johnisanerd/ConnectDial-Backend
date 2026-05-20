@@ -327,8 +327,12 @@ class PostViewSet(viewsets.ModelViewSet):
         permission_classes=[IsAuthenticated],
     )
     def like(self, request, pk=None):
-
-        post = self.get_object()
+        # ✅ FIX: direct fetch — self.get_object() triggers IsAuthorOrReadOnly
+        # and 403s anyone who isn't the post author.
+        try:
+            post = Post.objects.get(pk=pk)
+        except Post.DoesNotExist:
+            return Response({'error': 'Post not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         like_qs = PostLike.objects.filter(
             post=post,
