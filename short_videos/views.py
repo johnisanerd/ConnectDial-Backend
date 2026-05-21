@@ -1,20 +1,20 @@
 """
-ConnectDial — Views
-====================
+ConnectDial — Views (Final)
+============================
 Endpoints
 ─────────
 Feed
-  GET  /api/videos/shorts/feed/                              personalised short-video feed
+  GET  /api/videos/shorts/feed/                              personalised feed
 
 Upload
-  POST /api/videos/shorts/upload/                            upload a new short video
+  POST /api/videos/shorts/upload/                            upload short video
 
 Streaming
-  GET  /api/videos/shorts/<pk>/stream/                       HTTP Range-aware video stream
+  GET  /api/videos/shorts/<pk>/stream/                       HTTP Range stream
 
 Engagement
   POST /api/videos/shorts/<pk>/like/                         toggle like
-  POST /api/videos/shorts/<pk>/view/                         record view + watch_time
+  POST /api/videos/shorts/<pk>/view/                         record view
   POST /api/videos/shorts/<pk>/share/                        external share
   POST /api/videos/shorts/<pk>/reshare/                      in-app reshare toggle
 
@@ -23,6 +23,13 @@ Comments
   POST /api/videos/shorts/<pk>/comments/                     create comment
   GET  /api/videos/shorts/<pk>/comments/<comment_pk>/replies/ list replies
   PATCH/DELETE /api/videos/comments/<pk>/                    edit/delete own comment
+
+Key fix
+───────
+  All write serializers (VideoCommentCreateSerializer, VideoShareSerializer,
+  VideoViewSerializer) no longer have a 'video' field.  The resolved video
+  ORM instance is passed directly to serializer.save(video=video), bypassing
+  PrimaryKeyRelatedField / UUID parsing entirely — the root cause of the 500s.
 """
 
 # ── stdlib ────────────────────────────────────────────────────────────────────
@@ -75,23 +82,25 @@ User = get_user_model()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UPLOAD
+# HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-def _flatten_request_data(request_data, **extra):
+def _request_data_as_dict(request_data):
     """
-    Safely merge request.data (which may be a QueryDict with list values)
-    into a plain dict, then merge in any extra kwargs.
-    QueryDict.dict() returns the last value for each key, which is correct
-    for single-value fields like 'content', 'watch_time', 'platform'.
+    Convert request.data to a plain Python dict.
+    Django's QueryDict (used for form/multipart requests) stores every value
+    as a list — .dict() collapses each to its last value, which is correct
+    for all single-value fields we use (content, watch_time, platform, …).
+    JSON request bodies are already plain dicts.
     """
     if hasattr(request_data, 'dict'):
-        data = request_data.dict()
-    else:
-        data = dict(request_data)
-    data.update(extra)
-    return data
+        return request_data.dict()
+    return dict(request_data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPLOAD
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ShortVideoUploadView(generics.CreateAPIView):
     serializer_class   = ShortVideoCreateSerializer
@@ -119,7 +128,7 @@ class ShortVideoUploadView(generics.CreateAPIView):
     def perform_create(self, serializer):
         video_file = self.request.FILES.get('file') or self.request.FILES.get('video')
 
-        league = None
+        league    = None
         league_id = self.request.data.get('league_id') or self.request.data.get('league')
         if league_id:
             try:
@@ -160,14 +169,11 @@ class ShortVideoUploadView(generics.CreateAPIView):
     def _save_raw_and_publish(self, instance, tmp_path):
         try:
             duration = extract_duration(tmp_path)
-
             with open(tmp_path, 'rb') as f:
                 instance.video.save(os.path.basename(tmp_path), File(f), save=False)
-
             instance.duration = duration
-            instance.status = 'published'
+            instance.status   = 'published'
             instance.save(update_fields=['video', 'duration', 'status'])
-
             try:
                 thumb_bytes = generate_thumbnail(tmp_path)
                 instance.thumbnail.save(
@@ -177,7 +183,6 @@ class ShortVideoUploadView(generics.CreateAPIView):
                 )
             except Exception:
                 pass
-
         except Exception:
             instance.status = 'published'
             instance.save(update_fields=['status'])
@@ -232,10 +237,16 @@ class ShortVideoStreamView(APIView):
                     token_obj = Token.objects.select_related('user').get(key=token_key)
                     user = token_obj.user
                 except Token.DoesNotExist:
-                    return Response({"detail": "Invalid token."}, status=status.HTTP_401_UNAUTHORIZED)
+                    return Response(
+                        {"detail": "Invalid token."},
+                        status=status.HTTP_401_UNAUTHORIZED,
+                    )
 
         if not user.is_authenticated:
-            return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response(
+                {"detail": "Authentication required."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
         video = get_object_or_404(ShortVideo, pk=pk)
         return stream_video_response(request, video)
@@ -256,12 +267,18 @@ class VideoLikeToggleView(APIView):
         if created:
             ShortVideo.objects.filter(pk=pk).update(cached_likes=F('cached_likes') + 1)
             video.refresh_from_db(fields=['cached_likes'])
-            return Response({'liked': True, 'likes_count': video.cached_likes}, status=status.HTTP_201_CREATED)
+            return Response(
+                {'liked': True, 'likes_count': video.cached_likes},
+                status=status.HTTP_201_CREATED,
+            )
 
         like.delete()
         ShortVideo.objects.filter(pk=pk).update(cached_likes=F('cached_likes') - 1)
         video.refresh_from_db(fields=['cached_likes'])
-        return Response({'liked': False, 'likes_count': max(video.cached_likes, 0)}, status=status.HTTP_200_OK)
+        return Response(
+            {'liked': False, 'likes_count': max(video.cached_likes, 0)},
+            status=status.HTTP_200_OK,
+        )
 
 
 class VideoViewRecordView(APIView):
@@ -270,11 +287,14 @@ class VideoViewRecordView(APIView):
 
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
-        serializer = VideoViewSerializer(
-            data=_flatten_request_data(request.data, video=str(video.pk))
-        )
+
+        # Pass only non-video fields; video instance injected via save()
+        data = _request_data_as_dict(request.data)
+        data.pop('video', None)   # prevent any stale value from the client
+
+        serializer = VideoViewSerializer(data=data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(user=request.user)
+        serializer.save(user=request.user, video=video)
 
         ShortVideo.objects.filter(pk=pk).update(cached_views=F('cached_views') + 1)
 
@@ -287,35 +307,46 @@ class VideoShareRecordView(APIView):
 
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
-        serializer = VideoShareSerializer(
-            data=_flatten_request_data(request.data, video=str(video.pk))
-        )
+
+        data = _request_data_as_dict(request.data)
+        data.pop('video', None)
+
+        serializer = VideoShareSerializer(data=data)
         serializer.is_valid(raise_exception=True)
-        share = serializer.save(user=request.user)
+        share = serializer.save(user=request.user, video=video)
 
         ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') + 1)
         video.refresh_from_db(fields=['cached_shares'])
 
         platform = share.platform
-        payload = {
+        payload  = {
             **serializer.data,
-            'shares_count': video.cached_shares,
-            'share_url': video.share_url,
-            'og_title': video.og_title,
+            'shares_count':  video.cached_shares,
+            'share_url':     video.share_url,
+            'og_title':      video.og_title,
             'og_description': video.og_description,
-            'thumbnail_url': request.build_absolute_uri(video.thumbnail.url) if video.thumbnail else None,
+            'thumbnail_url': (
+                request.build_absolute_uri(video.thumbnail.url)
+                if video.thumbnail else None
+            ),
         }
 
         if platform == 'whatsapp':
             text = build_whatsapp_share_text(video)
-            payload['text'] = text
-            payload['whatsapp_url'] = f"https://wa.me/?text={quote(text)}"
+            payload['text']          = text
+            payload['whatsapp_url']  = f"https://wa.me/?text={quote(text)}"
         elif platform == 'telegram':
             text = build_telegram_share_text(video)
-            payload['text'] = text
-            payload['telegram_url'] = f"https://t.me/share/url?url={quote(video.share_url)}&text={quote(video.og_title)}"
+            payload['text']          = text
+            payload['telegram_url']  = (
+                f"https://t.me/share/url?url={quote(video.share_url)}"
+                f"&text={quote(video.og_title)}"
+            )
         elif platform == 'twitter':
-            payload['twitter_url'] = f"https://twitter.com/intent/tweet?url={quote(video.share_url)}&text={quote(video.og_title)}"
+            payload['twitter_url'] = (
+                f"https://twitter.com/intent/tweet"
+                f"?url={quote(video.share_url)}&text={quote(video.og_title)}"
+            )
 
         return Response(payload, status=status.HTTP_201_CREATED)
 
@@ -325,7 +356,7 @@ class VideoReshareView(APIView):
     permission_classes     = [IsAuthenticated]
 
     def post(self, request, pk):
-        video = get_object_or_404(ShortVideo, pk=pk)
+        video    = get_object_or_404(ShortVideo, pk=pk)
         existing = VideoShare.objects.filter(
             user=request.user, video=video, platform='reshare'
         ).first()
@@ -339,8 +370,9 @@ class VideoReshareView(APIView):
         ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') + 1)
         return Response({'reshared': True}, status=status.HTTP_201_CREATED)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# COMMENTS - Clean & Defensive
+# COMMENTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoCommentListCreateView(APIView):
@@ -350,47 +382,39 @@ class VideoCommentListCreateView(APIView):
     def get(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 
-        queryset = VideoComment.objects.filter(
-            video=video, parent__isnull=True
-        ).select_related('author')
+        qs = (
+            VideoComment.objects
+            .filter(video=video, parent__isnull=True)
+            .select_related('author', 'author__profile')
+            .prefetch_related('mentions__user', 'replies')
+            .order_by('created_at')
+        )
 
-        # Defensive profile prefetch
-        try:
-            queryset = queryset.select_related('author__profile')
-        except Exception:
-            pass
-
-        try:
-            queryset = queryset.prefetch_related('mentions__user', 'replies')
-        except Exception:
-            pass
-
-        comments = queryset.order_by('created_at')
-
-        serializer = VideoCommentSerializer(comments, many=True, context={'request': request})
+        serializer = VideoCommentSerializer(qs, many=True, context={'request': request})
         return Response(serializer.data)
 
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 
-        data = _flatten_request_data(request.data, video=str(video.pk))
+        # Strip 'video' from client payload — we inject the ORM instance below.
+        data = _request_data_as_dict(request.data)
+        data.pop('video', None)
 
         serializer = VideoCommentCreateSerializer(
             data=data,
-            context={'request': request}
+            context={'request': request},
         )
         serializer.is_valid(raise_exception=True)
 
-        comment = serializer.save(author=request.user)
+        # Pass video ORM instance — no UUID parsing in the serializer at all.
+        comment = serializer.save(author=request.user, video=video)
 
-        # Update cached count
-        ShortVideo.objects.filter(pk=pk).update(
-            cached_comments=F('cached_comments') + 1
+        ShortVideo.objects.filter(pk=pk).update(cached_comments=F('cached_comments') + 1)
+
+        return Response(
+            VideoCommentSerializer(comment, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
         )
-
-        # Return full serialized comment
-        read_serializer = VideoCommentSerializer(comment, context={'request': request})
-        return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
 
 class CommentRepliesListView(ListAPIView):
@@ -399,22 +423,16 @@ class CommentRepliesListView(ListAPIView):
     serializer_class       = VideoCommentSerializer
 
     def get_queryset(self):
-        queryset = VideoComment.objects.filter(
-            video_id=self.kwargs['pk'],
-            parent_id=self.kwargs['comment_pk']
-        ).select_related('author')
-
-        try:
-            queryset = queryset.select_related('author__profile')
-        except Exception:
-            pass
-
-        try:
-            queryset = queryset.prefetch_related('mentions__user')
-        except Exception:
-            pass
-
-        return queryset.order_by('created_at')
+        return (
+            VideoComment.objects
+            .filter(
+                video_id=self.kwargs['pk'],
+                parent_id=self.kwargs['comment_pk'],
+            )
+            .select_related('author', 'author__profile')
+            .prefetch_related('mentions__user')
+            .order_by('created_at')
+        )
 
 
 class CommentDetailView(APIView):
@@ -430,8 +448,15 @@ class CommentDetailView(APIView):
 
     def patch(self, request, pk):
         comment = self._get_own_comment(request, pk)
+
+        data = _request_data_as_dict(request.data)
+        data.pop('video', None)
+
         serializer = VideoCommentCreateSerializer(
-            comment, data=request.data, partial=True, context={'request': request}
+            comment,
+            data=data,
+            partial=True,
+            context={'request': request},
         )
         serializer.is_valid(raise_exception=True)
         updated = serializer.save(is_edited=True)
@@ -440,10 +465,9 @@ class CommentDetailView(APIView):
         )
 
     def delete(self, request, pk):
-        comment = self._get_own_comment(request, pk)
+        comment  = self._get_own_comment(request, pk)
         video_pk = comment.video_id
         comment.delete()
-
         ShortVideo.objects.filter(pk=video_pk).update(
             cached_comments=F('cached_comments') - 1
         )
