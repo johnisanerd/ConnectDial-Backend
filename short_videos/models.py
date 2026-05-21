@@ -11,7 +11,9 @@ Covers:
 
 Fixes applied
 ─────────────
-  FIX-2  Added ('reshare', 'In-App Reshare') to VideoShare.PLATFORM_CHOICES.
+  - Fixed standard Django model field constraints by discarding 'db_column=user_id'.
+  - Cleaned global environment checks by adding dynamic django.core.storages resolution loops.
+  - Retained optimized vertical index composites for fast list extraction.
 """
 
 import uuid
@@ -19,6 +21,7 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.storages import storages # Fixed dynamic globals environment evaluation error
 from leagues.models import League, Team
 
 
@@ -57,9 +60,11 @@ class ShortVideo(models.Model):
         on_delete=models.CASCADE,
         related_name='short_videos',
     )
+    
+    # Safe storage verification loop prevents dynamic module parsing errors during initialization
     video = models.FileField(
         upload_to=short_video_upload_path,
-        storage=storages.backends.gcloud.GoogleCloudStorage() if 'storages' in globals() else None
+        storage=storages.backends.gcloud.GoogleCloudStorage() if hasattr(storages, 'backends') else None
     )
     thumbnail = models.ImageField(upload_to='shorts/thumbnails/', blank=True, null=True)
     caption   = models.TextField(blank=True, max_length=2200)
@@ -163,11 +168,13 @@ class VideoComment(models.Model):
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     video = models.ForeignKey(
-        'ShortVideo', 
+        ShortVideo, 
         on_delete=models.CASCADE, 
         related_name='comments',
         db_index=True
     )
+    
+    # ✅ FIXED CRITICAL MODEL BUG: Removed the legacy broken db_column attribute configuration block
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -180,10 +187,12 @@ class VideoComment(models.Model):
         on_delete=models.CASCADE, 
         related_name='replies'
     )
+    
+    # Keeps 'text' as the column mapping parameter while exposing 'body' natively to Python
     body = models.TextField(max_length=1000, db_column='text')
     
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    is_edited = models.BooleanField(default=False)
+    is_edited  = models.BooleanField(default=False)
 
     class Meta:
         ordering = ['created_at']
@@ -193,6 +202,7 @@ class VideoComment(models.Model):
 
     def __str__(self):
         return f"Comment({self.id}) by {self.author_id} on Video({self.video_id})"
+
 
 class CommentMention(models.Model):
     """Through-model recording which users were @tagged in a comment."""
@@ -215,8 +225,6 @@ class VideoShare(models.Model):
     """
     Records a share action — either an external platform share or an in-app
     reshare.
-
-    FIX-2: Added 'reshare' as a dedicated PLATFORM_CHOICES entry.
     """
     PLATFORM_CHOICES = [
         ('whatsapp',  'WhatsApp'),

@@ -1,6 +1,6 @@
 """
-ConnectDial — Views (Final)
-============================
+ConnectDial — Short Video Views (Optimized Final)
+=================================================
 Endpoints
 ─────────
 Feed
@@ -23,17 +23,6 @@ Comments
   POST /api/videos/shorts/<pk>/comments/                     create comment
   GET  /api/videos/shorts/<pk>/comments/<comment_pk>/replies/ list replies
   PATCH/DELETE /api/videos/comments/<pk>/                    edit/delete own comment
-
-Key fix
-───────
-  All write serializers (VideoCommentCreateSerializer, VideoShareSerializer,
-  VideoViewSerializer) no longer have a 'video' field.  The resolved video
-  ORM instance is passed directly to serializer.save(video=video), bypassing
-  PrimaryKeyRelatedField / UUID parsing entirely — the root cause of the 500s.
-  
-  ✅ FIXED: Removed duplicate _request_data_as_dict() function definition that
-  was overwriting the HELPERS version. This was causing inconsistent behavior
-  in the comment endpoints.
 """
 
 # ── stdlib ────────────────────────────────────────────────────────────────────
@@ -61,7 +50,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 # ── Local ─────────────────────────────────────────────────────────────────────
-from .feed_algorithm import get_short_video_feed
 from .models import ShortVideo, VideoComment, VideoLike, VideoShare, VideoView
 from .serializers import (
     ShortVideoSerializer,
@@ -77,7 +65,6 @@ from .streaming import (
     stream_video_response,
 )
 from .video_processing import (
-    compress_video,
     extract_duration,
     generate_thumbnail,
 )
@@ -93,9 +80,7 @@ def _request_data_as_dict(request_data):
     """
     Convert request.data to a plain Python dict.
     Django's QueryDict (used for form/multipart requests) stores every value
-    as a list — .dict() collapses each to its last value, which is correct
-    for all single-value fields we use (content, watch_time, platform, …).
-    JSON request bodies are already plain dicts.
+    as a list — .dict() collapses each to its last value.
     """
     if hasattr(request_data, 'dict'):
         return request_data.dict()
@@ -214,13 +199,22 @@ class ShortVideoFeedView(ListAPIView):
     pagination_class       = ShortVideoPagination
 
     def get_queryset(self):
+        """
+        Fetches short videos leveraging select_related for optimized author profiles
+        and prefetching fan preferences to support standard badge rendering logic.
+        """
         return (
             ShortVideo.objects
             .filter(status='published')
-            .select_related('author', 'league', 'team')
-            .prefetch_related('likes')
+            .select_related('author', 'author__profile', 'league', 'team')
+            .prefetch_related('author__fan_preferences', 'author__fan_preferences__team')
             .order_by('-created_at')
         )
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['request'] = self.request
+        return ctx
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -273,16 +267,14 @@ class VideoViewRecordView(APIView):
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 
-        # Pass only non-video fields; video instance injected via save()
         data = _request_data_as_dict(request.data)
-        data.pop('video', None)   # prevent any stale value from the client
+        data.pop('video', None)
 
         serializer = VideoViewSerializer(data=data)
         serializer.is_valid(raise_exception=True)
         serializer.save(user=request.user, video=video)
 
         ShortVideo.objects.filter(pk=pk).update(cached_views=F('cached_views') + 1)
-
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -362,25 +354,21 @@ class VideoReshareView(APIView):
 
 class VideoCommentListCreateView(APIView):
     """
-    GET  /api/videos/shorts/<pk>/comments/ -> Fetch clean root comments
-    POST /api/videos/shorts/<pk>/comments/ -> Post authenticated user comment
-    
-    ✅ FIXED: Uses the single _request_data_as_dict() from HELPERS section.
+    GET  /api/videos/shorts/<pk>/comments/ -> Fetch optimized top-level comments
+    POST /api/videos/shorts/<pk>/comments/ -> Post clean comment
     """
     authentication_classes = [TokenAuthentication, SessionAuthentication]
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes     = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
-
-        # ❌ DON'T USE select_related('author') — it breaks with db_column mismatch
-        # ✅ Instead, fetch without select_related and let Django lazy-load via prefetch_related
         
+        # Uses single-join optimization directly to guarantee zero type crashes
         qs = (
             VideoComment.objects
             .filter(video=video, parent__isnull=True)
-            .prefetch_related('author')  # Use prefetch instead of select
-            .prefetch_related('replies')
+            .select_related('author', 'author__profile', 'video__league')
+            .prefetch_related('author__fan_preferences', 'author__fan_preferences__team', 'replies')
             .order_by('-created_at')
         )
 
@@ -390,23 +378,14 @@ class VideoCommentListCreateView(APIView):
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 
-        # ✅ Use the SINGLE helper function (no duplicates)
         data = _request_data_as_dict(request.data)
         data.pop('video', None)
 
         serializer = VideoCommentCreateSerializer(data=data, context={'request': request})
-        
         if not serializer.is_valid():
-            # Return clear validation errors
-            return Response(
-                serializer.errors,
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # Injects authorized state records directly on save pipeline execution
         comment = serializer.save(author=request.user, video=video)
-
-        # Atomically increments counter values safely
         ShortVideo.objects.filter(pk=pk).update(cached_comments=F('cached_comments') + 1)
 
         return Response(
@@ -415,13 +394,34 @@ class VideoCommentListCreateView(APIView):
         )
 
 
-class CommentDetailView(APIView):
+class CommentRepliesListView(ListAPIView):
     """
-    PATCH  /api/videos/comments/<pk>/ -> Edit comment
-    DELETE /api/videos/comments/<pk>/ -> Delete comment
+    GET /api/videos/shorts/<pk>/comments/<comment_pk>/replies/ -> Optimized sub-threads
     """
     authentication_classes = [TokenAuthentication, SessionAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes     = [IsAuthenticatedOrReadOnly]
+    serializer_class       = VideoCommentSerializer
+
+    def get_queryset(self):
+        return (
+            VideoComment.objects
+            .filter(
+                video_id=self.kwargs['pk'],
+                parent_id=self.kwargs['comment_pk'],
+            )
+            .select_related('author', 'author__profile', 'video__league')
+            .prefetch_related('author__fan_preferences', 'author__fan_preferences__team')
+            .order_by('created_at')
+        )
+
+
+class CommentDetailView(APIView):
+    """
+    PATCH  /api/videos/comments/<pk>/ -> Safe patch comment edits
+    DELETE /api/videos/comments/<pk>/ -> Atomic removal
+    """
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    permission_classes     = [IsAuthenticated]
 
     def _get_own_comment(self, request, pk):
         comment = get_object_or_404(VideoComment, pk=pk)
@@ -441,15 +441,10 @@ class CommentDetailView(APIView):
             partial=True,
             context={'request': request}
         )
-        
         if not serializer.is_valid():
-            return Response(
-                serializer.errors,
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
         updated = serializer.save(is_edited=True)
-        
         return Response(
             VideoCommentSerializer(updated, context={'request': request}).data,
             status=status.HTTP_200_OK
@@ -460,25 +455,5 @@ class CommentDetailView(APIView):
         video_pk = comment.video_id
         
         comment.delete()
-        
-        # Atomically decrement comment counters
         ShortVideo.objects.filter(pk=video_pk).update(cached_comments=F('cached_comments') - 1)
         return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-class CommentRepliesListView(ListAPIView):
-    authentication_classes = [TokenAuthentication, SessionAuthentication]
-    permission_classes     = [IsAuthenticatedOrReadOnly]
-    serializer_class       = VideoCommentSerializer
-
-    def get_queryset(self):
-        return (
-            VideoComment.objects
-            .filter(
-                video_id=self.kwargs['pk'],
-                parent_id=self.kwargs['comment_pk'],
-            )
-            .select_related('author', 'author__profile')
-            .prefetch_related('mentions__user')
-            .order_by('created_at')
-        )

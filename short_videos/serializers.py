@@ -1,35 +1,124 @@
 """
-ConnectDial — Serializers (Final)
-==================================
-Key fixes
-─────────
-  - VideoCommentCreateSerializer: 'video' field REMOVED — video instance is
-    passed directly via serializer.save(video=video) in the view, bypassing
-    all UUID / PrimaryKeyRelatedField lookup issues entirely.
-  - VideoCommentCreateSerializer: accepts both 'content' and 'body' from the
-    frontend (RN sends 'content', model stores 'body').
-  - VideoCommentSerializer: exposes both 'content' and 'body' so RN reads work.
-  - Removed duplicate MentionedUserSerializer / CommentMentionSerializer classes.
-  - VideoShareSerializer / VideoViewSerializer: 'video' also removed and passed
-    via save() to avoid the same UUID serializer lookup problem.
+ConnectDial — Short Video Serializers (Optimized Baseline)
+=============================================================================
+Design updates applied following the Posts app architecture pattern:
+  - Added SupportLogicMixin to dynamically inject "Supports [Team]" contextual badges.
+  - Implemented a unified _author_dict helper to prevent double model relation evaluations.
+  - Explicitly declared 'video' and 'file' as writable fields on ShortVideoCreateSerializer 
+    to guarantee multi-part parser streams aren't silently discarded by DRF filters.
+  - Keeps VideoCommentSerializer as a lightweight, secure read-only container.
 """
 
 import re
-from django.contrib.auth import get_user_model
 from rest_framework import serializers
+from django.contrib.auth import get_user_model
+from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.types import OpenApiTypes
 
 from .models import (
     ShortVideo, VideoComment, CommentMention,
-    VideoLike, VideoShare, VideoView,
+    VideoLike, VideoShare, VideoView
 )
 
 User = get_user_model()
-
 _MENTION_RE = re.compile(r'@([\w.]+)')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# USER (LIGHTWEIGHT)
+# REUSABLE PIPELINE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_url(request, file_field):
+    """Return an absolute URL path signature for a FileField or ImageField, or None."""
+    if not file_field:
+        return None
+    try:
+        url = file_field.url
+    except Exception:
+        return None
+    return request.build_absolute_uri(url) if request else url
+
+
+def _author_dict(user, request):
+    """
+    Build unified, lightweight author profiles.
+    Guarantees performance gains by reading items already allocated to memory.
+    """
+    if not user or user.is_anonymous:
+        return {
+            'id':           None,
+            'username':     'Anonymous',
+            'display_name': 'Anonymous User',
+            'profile_pic':  None,
+            'account_type': 'fan',
+        }
+
+    profile     = getattr(user, 'profile', None)
+    if not profile:
+        profile = getattr(user, 'userprofile', None) or getattr(author, 'user_profile', None)
+        
+    profile_pic = _build_url(request, getattr(profile, 'avatar', getattr(profile, 'profile_image', None)))
+
+    return {
+        'id':           user.id,
+        'username':     user.username,
+        'display_name': (profile.display_name if profile and getattr(profile, 'display_name', None) else user.username),
+        'profile_pic':  profile_pic,
+        'account_type': getattr(user, 'account_type', 'fan'),
+        'badge_type':   getattr(user, 'badge_type', None),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUPPORT CONTEXT MIXIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SupportLogicMixin:
+    """
+    Resolves the active team badge tracking next to videos or commentary records.
+    """
+    @extend_schema_field(OpenApiTypes.OBJECT)
+    def get_supporting_info(self, obj):
+        user = getattr(obj, 'author', getattr(obj, 'user', None))
+        if not user or user.is_anonymous:
+            return None
+
+        if getattr(user, 'account_type', None) in ('news', 'organization'):
+            return None
+
+        target_league = getattr(obj, 'league', None)
+        if not target_league and hasattr(obj, 'video'):
+            target_league = getattr(obj.video, 'league', None)
+
+        if target_league:
+            pref = next(
+                (p for p in user.fan_preferences.all() if p.league_id == target_league.id),
+                None,
+            ) if hasattr(user, 'fan_preferences') else None
+            
+            if pref and pref.team:
+                return {
+                    'team_name':   pref.team.name,
+                    'team_logo':   _build_url(None, pref.team.logo),
+                    'league_name': target_league.name,
+                    'type':        'contextual',
+                }
+
+        fav_team   = getattr(user, 'favorite_team', None)
+        fav_league = getattr(user, 'favorite_league', None)
+        if fav_team:
+            return {
+                'team_name':   fav_team.name,
+                'team_logo':   _build_url(None, fav_team.logo),
+                'league_name': fav_league.name if fav_league else 'Global',
+                'type':        'global',
+            }
+
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MENTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MentionedUserSerializer(serializers.ModelSerializer):
@@ -37,10 +126,6 @@ class MentionedUserSerializer(serializers.ModelSerializer):
         model  = User
         fields = ['id', 'username']
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MENTIONS
-# ─────────────────────────────────────────────────────────────────────────────
 
 class CommentMentionSerializer(serializers.ModelSerializer):
     user = MentionedUserSerializer(read_only=True)
@@ -51,93 +136,42 @@ class CommentMentionSerializer(serializers.ModelSerializer):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMMENTS — READ
+# COMMENTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# serializers.py
-# =============================================================================
-
-# serializers.py
-# ─────────────────────────────────────────────────────────────────────────────
-class VideoCommentSerializer(serializers.ModelSerializer):
+class VideoCommentSerializer(SupportLogicMixin, serializers.Serializer):
     """
-    Read-only serializer for delivering data to the mobile client securely.
-    Bypasses deep SQL serialization errors via dynamic model method fields.
+    Read-only comment structure decoupled from heavy relational model properties.
     """
-    author_details = serializers.SerializerMethodField()
-    reply_count = serializers.SerializerMethodField()
-    content = serializers.SerializerMethodField()
-    video_id = serializers.ReadOnlyField(source='video.id') # Delivers raw primitive string UUID safely
+    id              = serializers.UUIDField(read_only=True)
+    video_id        = serializers.UUIDField(read_only=True)
+    body            = serializers.CharField(read_only=True)
+    content         = serializers.SerializerMethodField()
+    author_details  = serializers.SerializerMethodField()
+    supporting_info = serializers.SerializerMethodField()
+    reply_count     = serializers.SerializerMethodField()
+    created_at      = serializers.DateTimeField(read_only=True)
+    is_edited       = serializers.BooleanField(read_only=True)
 
-    class Meta:
-        model = VideoComment
-        fields = [
-            'id',
-            'video_id',
-            'author_details',
-            'body',
-            'content',      
-            'reply_count',
-            'created_at',
-            'is_edited',
-        ]
-        read_only_fields = ['id', 'created_at', 'is_edited']
-
+    @extend_schema_field(OpenApiTypes.STR)
     def get_content(self, obj):
-        # Maps database 'body' back to 'content' dynamically for the client
         return obj.body if obj.body else ""
 
-    def get_author_details(self, obj):
-        request = self.context.get('request')
-        author = obj.author
-        
-        if not author or author.is_anonymous:
-            return {
-                'id': None,
-                'username': 'Anonymous',
-                'display_name': 'Anonymous User',
-                'profile_pic': None,
-            }
-
-        display_name = author.username
-        avatar_url = None
-
-        # Fail-safe scanning across possible profile mapping schemas to prevent 500 errors
-        profile = getattr(author, 'profile', None)
-        if not profile:
-            profile = getattr(author, 'userprofile', None) or getattr(author, 'user_profile', None)
-
-        if profile:
-            display_name = getattr(profile, 'display_name', author.username)
-            avatar_field = getattr(profile, 'avatar', None)
-            if avatar_field and hasattr(avatar_field, 'url'):
-                try:
-                    avatar_url = (
-                        request.build_absolute_uri(avatar_field.url)
-                        if request else avatar_field.url
-                    )
-                except Exception:
-                    pass
-
-        return {
-            'id':           author.id,
-            'username':     author.username,
-            'display_name': display_name,
-            'profile_pic':  avatar_url,
-        }
-
+    @extend_schema_field(OpenApiTypes.INT)
     def get_reply_count(self, obj):
         return obj.replies.count() if hasattr(obj, 'replies') else 0
 
+    @extend_schema_field(OpenApiTypes.OBJECT)
+    def get_author_details(self, obj):
+        request = self.context.get('request')
+        return _author_dict(obj.author, request)
+
 
 class VideoCommentCreateSerializer(serializers.ModelSerializer):
-    """
-    Write serializer optimizing raw content ingestion payloads.
-    """
     content = serializers.CharField(required=False, write_only=True)
 
     class Meta:
-        model = VideoComment
+        model  = VideoComment
         fields = ['id', 'parent', 'body', 'content']
         read_only_fields = ['id']
         extra_kwargs = {
@@ -146,7 +180,6 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
         }
 
     def validate(self, attrs):
-        # Gracefully swallow content aliases from React Native and convert to body property
         if 'content' in attrs and not attrs.get('body'):
             attrs['body'] = attrs.pop('content')
         else:
@@ -156,8 +189,7 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
         if not body.strip():
             raise serializers.ValidationError({'content': 'Comment cannot be empty.'})
         if len(body) > 1000:
-            raise serializers.ValidationError({'content': 'Comment exceeds maximum allowed limit (1000 chars).'})
-        
+            raise serializers.ValidationError({'content': 'Comment is too long (max 1000 characters).'})
         attrs['body'] = body.strip()
         return attrs
 
@@ -165,105 +197,82 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
         if value and value.parent_id is not None:
             raise serializers.ValidationError("Nested sub-replies are disabled. Use standard tags.")
         return value
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SHORT VIDEO — READ
 # ─────────────────────────────────────────────────────────────────────────────
 
-class ShortVideoSerializer(serializers.ModelSerializer):
-    author_username  = serializers.CharField(source='author.username', read_only=True)
-    author_avatar    = serializers.SerializerMethodField()
-    author_id        = serializers.IntegerField(source='author.id', read_only=True)
-
-    league_name      = serializers.CharField(source='league.name', read_only=True, default=None)
-    team_name        = serializers.CharField(source='team.name',   read_only=True, default=None)
+class ShortVideoSerializer(SupportLogicMixin, serializers.ModelSerializer):
+    author_details   = serializers.SerializerMethodField()
+    supporting_info  = serializers.SerializerMethodField()
+    
+    league_details   = serializers.SerializerMethodField()
+    team_details     = serializers.SerializerMethodField()
 
     likes_count      = serializers.IntegerField(source='cached_likes',    read_only=True)
     comments_count   = serializers.IntegerField(source='cached_comments', read_only=True)
     shares_count     = serializers.IntegerField(source='cached_shares',   read_only=True)
     views_count      = serializers.IntegerField(source='cached_views',    read_only=True)
 
-    duration_display = serializers.CharField(read_only=True)
-
     video_url        = serializers.SerializerMethodField()
     thumbnail_url    = serializers.SerializerMethodField()
-    share_url        = serializers.SerializerMethodField()
     is_liked         = serializers.SerializerMethodField()
-    og_title         = serializers.SerializerMethodField()
-    og_description   = serializers.SerializerMethodField()
 
     class Meta:
         model  = ShortVideo
         fields = [
-            'id',
-            'author_id',
-            'author_username',
-            'author_avatar',
-            'video_url',
-            'thumbnail_url',
-            'caption',
-            'league_name',
-            'team_name',
-            'duration',
-            'duration_display',
-            'likes_count',
-            'comments_count',
-            'shares_count',
-            'views_count',
-            'is_liked',
-            'share_url',
-            'og_title',
-            'og_description',
-            'created_at',
-            'status',
+            'id', 'author_details', 'video_url', 'thumbnail_url', 'caption',
+            'league', 'league_details', 'team', 'team_details', 'supporting_info',
+            'duration', 'duration_display', 'likes_count', 'comments_count',
+            'shares_count', 'views_count', 'is_liked', 'created_at', 'status',
         ]
 
-    def get_author_avatar(self, obj):
+    @extend_schema_field(OpenApiTypes.OBJECT)
+    def get_author_details(self, obj):
         request = self.context.get('request')
-        try:
-            if obj.author.profile.avatar:
-                url = obj.author.profile.avatar.url
-                return request.build_absolute_uri(url) if request else url
-        except Exception:
-            pass
-        return None
+        return _author_dict(obj.author, request)
 
+    @extend_schema_field(OpenApiTypes.URI)
     def get_video_url(self, obj):
         request = self.context.get('request')
         path    = f"/api/videos/shorts/{obj.pk}/stream/"
-        token   = None
-        if request and request.auth:
-            token = request.auth.key
+        token   = request.auth.key if request and request.auth else None
         if token:
             path = f"{path}?token={token}"
         return request.build_absolute_uri(path) if request else path
 
+    @extend_schema_field(OpenApiTypes.URI)
     def get_thumbnail_url(self, obj):
         request = self.context.get('request')
-        if obj.thumbnail:
-            url = obj.thumbnail.url
-            return request.build_absolute_uri(url) if request else url
-        return None
+        return _build_url(request, obj.thumbnail)
 
-    def get_share_url(self, obj):
-        return obj.share_url
-
+    @extend_schema_field(OpenApiTypes.BOOL)
     def get_is_liked(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             return obj.likes.filter(user=request.user).exists()
         return False
 
-    def get_og_title(self, obj):
-        try:
-            return obj.og_title
-        except AttributeError:
-            return f"{obj.author.username}: {obj.caption[:80]}" if obj.caption else str(obj.id)
+    @extend_schema_field(OpenApiTypes.OBJECT)
+    def get_league_details(self, obj):
+        if obj.league_id and obj.league:
+            return {
+                'id':   obj.league.id,
+                'name': obj.league.name,
+                'logo': _build_url(None, obj.league.logo) if hasattr(obj.league, 'logo') else None,
+            }
+        return None
 
-    def get_og_description(self, obj):
-        try:
-            return obj.og_description
-        except AttributeError:
-            return obj.caption[:200] if obj.caption else ""
+    @extend_schema_field(OpenApiTypes.OBJECT)
+    def get_team_details(self, obj):
+        if obj.team_id and obj.team:
+            return {
+                'id':   obj.team.id,
+                'name': obj.team.name,
+                'logo': _build_url(None, obj.team.logo) if hasattr(obj.team, 'logo') else None,
+            }
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -271,8 +280,13 @@ class ShortVideoSerializer(serializers.ModelSerializer):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ShortVideoCreateSerializer(serializers.ModelSerializer):
-    video = serializers.FileField(required=False)
-    file  = serializers.FileField(required=False, write_only=True)
+    """
+    Write serializer optimizing raw video ingestion payloads.
+    Ensures that DRF handles file parsing streams correctly without discarding input metadata.
+    """
+    # ── FIXED CRITICAL WRITABLE WRAPPER (Follows Posts Pattern) ─────────────
+    video = serializers.FileField(required=False, allow_null=True, allow_empty_file=True)
+    file  = serializers.FileField(required=False, write_only=True, allow_null=True, allow_empty_file=True)
 
     class Meta:
         model  = ShortVideo
@@ -290,20 +304,16 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
             return value
         content_type = getattr(value, 'content_type', '') or ''
         if content_type and not content_type.startswith('video/'):
-            raise serializers.ValidationError(
-                f"Uploaded file must be a video. Received: {content_type}"
-            )
+            raise serializers.ValidationError(f"Uploaded file must be a valid video stream. Received: {content_type}")
+            
         max_size_bytes = 2 * 1024 * 1024 * 1024  # 2 GB
         if value.size > max_size_bytes:
-            size_gb = value.size / (1024 * 1024 * 1024)
-            raise serializers.ValidationError(
-                f"Video file is too large ({size_gb:.2f} GB). Maximum allowed size is 2 GB."
-            )
+            raise serializers.ValidationError("Video payload bounds exceed max limitations (2 GB).")
         return value
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENGAGEMENT
+# ENGAGEMENT (UTILITIES)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoLikeSerializer(serializers.ModelSerializer):
@@ -314,37 +324,16 @@ class VideoLikeSerializer(serializers.ModelSerializer):
 
 
 class VideoShareSerializer(serializers.ModelSerializer):
-    """
-    'video' is excluded — passed via serializer.save(video=video_instance).
-    """
     class Meta:
         model  = VideoShare
         fields = ['id', 'platform', 'created_at']
         read_only_fields = ['id', 'created_at']
 
-    def validate_platform(self, value):
-        valid = {c[0] for c in VideoShare.PLATFORM_CHOICES}
-        if value not in valid:
-            raise serializers.ValidationError(
-                f"Platform must be one of: {', '.join(sorted(valid))}"
-            )
-        return value
-
 
 class VideoViewSerializer(serializers.ModelSerializer):
-    """
-    'video' is excluded — passed via serializer.save(video=video_instance).
-    """
     completed = serializers.BooleanField(read_only=True)
 
     class Meta:
         model  = VideoView
         fields = ['id', 'watch_time', 'completed', 'created_at']
         read_only_fields = ['id', 'completed', 'created_at']
-
-    def validate_watch_time(self, value):
-        if value < 0:
-            raise serializers.ValidationError("watch_time cannot be negative.")
-        if value > 7200:
-            raise serializers.ValidationError("watch_time cannot exceed 7200 seconds (2 hrs).")
-        return value
