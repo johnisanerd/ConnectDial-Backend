@@ -414,6 +414,12 @@ class CommentRepliesListView(ListAPIView):
             .prefetch_related('author__fan_preferences', 'author__fan_preferences__team')
             .order_by('created_at')
         )
+        
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['request'] = self.request
+        return ctx
+
 
 class CommentDetailView(APIView):
     """
