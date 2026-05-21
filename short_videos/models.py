@@ -188,11 +188,11 @@ class VideoComment(models.Model):
             models.Index(fields=['video', 'parent', 'created_at']),
         ]
 
-# ✅ FIX: Update __str__ to access the correct model attributes securely
+    # ✅ FIX: Update __str__ to access the correct model attributes securely
     def __str__(self):
-        return f"Comment {self.id} by User {self.author_id} on Video {self.video.id if self.video else 'Unknown'}"
-
-
+            if self.video_id:
+                return f"Comment {self.id} by User {self.author_id} on Video {self.video_id}"
+            return f"Comment {self.id} by User {self.author_id}"
 class CommentMention(models.Model):
     """Through-model recording which users were @tagged in a comment."""
     comment    = models.ForeignKey(VideoComment, on_delete=models.CASCADE, related_name='mentions')
