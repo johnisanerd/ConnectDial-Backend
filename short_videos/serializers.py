@@ -59,23 +59,24 @@ class CommentMentionSerializer(serializers.ModelSerializer):
 
 # serializers.py
 # ─────────────────────────────────────────────────────────────────────────────
-
 class VideoCommentSerializer(serializers.ModelSerializer):
+    """
+    Read-only serializer for delivering data to the mobile client securely.
+    Bypasses deep SQL serialization errors via dynamic model method fields.
+    """
     author_details = serializers.SerializerMethodField()
-    mentions       = CommentMentionSerializer(many=True, read_only=True)
-    reply_count    = serializers.SerializerMethodField()
-    content        = serializers.SerializerMethodField()
-    video_id       = serializers.ReadOnlyField(source='video.id')
+    reply_count = serializers.SerializerMethodField()
+    content = serializers.SerializerMethodField()
+    video_id = serializers.ReadOnlyField(source='video.id') # Delivers raw primitive string UUID safely
 
     class Meta:
-        model  = VideoComment
+        model = VideoComment
         fields = [
             'id',
             'video_id',
             'author_details',
             'body',
             'content',      
-            'mentions',
             'reply_count',
             'created_at',
             'is_edited',
@@ -83,6 +84,7 @@ class VideoCommentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'is_edited']
 
     def get_content(self, obj):
+        # Maps database 'body' back to 'content' dynamically for the client
         return obj.body if obj.body else ""
 
     def get_author_details(self, obj):
@@ -93,17 +95,16 @@ class VideoCommentSerializer(serializers.ModelSerializer):
             return {
                 'id': None,
                 'username': 'Anonymous',
-                'display_name': 'Anonymous',
+                'display_name': 'Anonymous User',
                 'profile_pic': None,
             }
 
         display_name = author.username
         avatar_url = None
 
-        # Safe attribute scanning — guards against missing relationship targets completely
+        # Fail-safe scanning across possible profile mapping schemas to prevent 500 errors
         profile = getattr(author, 'profile', None)
         if not profile:
-            # Check fallback configurations
             profile = getattr(author, 'userprofile', None) or getattr(author, 'user_profile', None)
 
         if profile:
@@ -127,25 +128,16 @@ class VideoCommentSerializer(serializers.ModelSerializer):
 
     def get_reply_count(self, obj):
         return obj.replies.count() if hasattr(obj, 'replies') else 0
-# ─────────────────────────────────────────────────────────────────────────────
-# COMMENTS — WRITE
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 class VideoCommentCreateSerializer(serializers.ModelSerializer):
     """
-    Write serializer for creating and updating comments.
-
-    IMPORTANT — 'video' is intentionally NOT in fields.
-    The view calls serializer.save(video=video_instance) directly,
-    which avoids all UUID / PrimaryKeyRelatedField parsing entirely.
-
-    Accepts BOTH 'content' (what RN sends) and 'body' (model field).
-    Maps content → body before saving.
+    Write serializer optimizing raw content ingestion payloads.
     """
     content = serializers.CharField(required=False, write_only=True)
 
     class Meta:
-        model  = VideoComment
+        model = VideoComment
         fields = ['id', 'parent', 'body', 'content']
         read_only_fields = ['id']
         extra_kwargs = {
@@ -154,7 +146,7 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
         }
 
     def validate(self, attrs):
-        # Accept 'content' as alias for 'body'
+        # Gracefully swallow content aliases from React Native and convert to body property
         if 'content' in attrs and not attrs.get('body'):
             attrs['body'] = attrs.pop('content')
         else:
@@ -164,27 +156,15 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
         if not body.strip():
             raise serializers.ValidationError({'content': 'Comment cannot be empty.'})
         if len(body) > 1000:
-            raise serializers.ValidationError({'content': 'Comment is too long (max 1 000 characters).'})
+            raise serializers.ValidationError({'content': 'Comment exceeds maximum allowed limit (1000 chars).'})
+        
         attrs['body'] = body.strip()
         return attrs
 
     def validate_parent(self, value):
         if value and value.parent_id is not None:
-            raise serializers.ValidationError(
-                "Replies to replies are not supported. Use @mention instead."
-            )
+            raise serializers.ValidationError("Nested sub-replies are disabled. Use standard tags.")
         return value
-
-    def update(self, instance, validated_data):
-        # is_edited is injected by the view via save(is_edited=True)
-        is_edited = validated_data.pop('is_edited', None)
-        instance  = super().update(instance, validated_data)
-        if is_edited is not None:
-            instance.is_edited = is_edited
-            instance.save(update_fields=['is_edited'])
-        return instance
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SHORT VIDEO — READ
 # ─────────────────────────────────────────────────────────────────────────────

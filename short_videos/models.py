@@ -159,46 +159,41 @@ class VideoLike(models.Model):
 
 class VideoComment(models.Model):
     """
-    Comment on a ShortVideo with optional threading and @mention support.
-
-    NOTE: The DB column for `author` is `user_id` (legacy name from initial
-    migration). We keep the Python attribute as `author` and use
-    db_column='user_id' to bridge the mismatch without a schema migration.
+    Comment on a ShortVideo with optimal threading structures.
     """
-    id     = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    video  = models.ForeignKey(ShortVideo, on_delete=models.CASCADE, related_name='comments')
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    video = models.ForeignKey(
+        'ShortVideo', 
+        on_delete=models.CASCADE, 
+        related_name='comments',
+        db_index=True
+    )
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='video_comments',
-        db_column='user_id',
+        db_column='user_id', # Bridges the column mismatch safely without breaking the DB schema
     )
     parent = models.ForeignKey(
-        'self', null=True, blank=True,
-        on_delete=models.CASCADE, related_name='replies',
+        'self', 
+        null=True, 
+        blank=True,
+        on_delete=models.CASCADE, 
+        related_name='replies'
     )
     body = models.TextField(max_length=1000, db_column='text')
-
-    mentioned_users = models.ManyToManyField(
-        settings.AUTH_USER_MODEL,
-        through='CommentMention',
-        related_name='comment_mentions',
-        blank=True,
-    )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    is_edited  = models.BooleanField(default=False)
+    
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    is_edited = models.BooleanField(default=False)
 
     class Meta:
         ordering = ['created_at']
-        indexes  = [
-            models.Index(fields=['video', 'created_at']),
-            models.Index(fields=['parent']),
+        indexes = [
+            models.Index(fields=['video', 'parent', 'created_at']),
         ]
 
     def __str__(self):
-        return f"Comment({self.id}) on {self.video_id} by {self.author_id}"
-
+        return f"Comment({self.id}) by {self.author_id} on Video({self.video_id})"
 
 class CommentMention(models.Model):
     """Through-model recording which users were @tagged in a comment."""

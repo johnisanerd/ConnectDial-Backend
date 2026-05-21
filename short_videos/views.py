@@ -379,54 +379,95 @@ class VideoReshareView(APIView):
 
 # views.py
 # =============================================================================
+def _request_data_as_dict(request_data):
+    if hasattr(request_data, 'dict'):
+        return request_data.dict()
+    return dict(request_data)
 
 class VideoCommentListCreateView(APIView):
-    # Fix: Ensure BOTH authentication engines are paired so unauthenticated list reads
-    # and authenticated user write payloads are verified flawlessly without dropping into 500s.
+    """
+    GET  /api/videos/shorts/<pk>/comments/ -> Fetch clean root comments
+    POST /api/videos/shorts/<pk>/comments/ -> Post authenticated user comment
+    """
     authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, pk):
-        # 1. Make sure the video instance exists safely
         video = get_object_or_404(ShortVideo, pk=pk)
 
-        # 2. Pull root comments using a stable, single join query setup
+        # Uses single-join optimization directly to guarantee zero type crashes
         qs = (
             VideoComment.objects
             .filter(video=video, parent__isnull=True)
-            .select_related('author') # Clean single join, no unstable double profiles
-            .prefetch_related('mentions__user', 'replies')
-            .order_by('created_at')
+            .select_related('author') 
+            .prefetch_related('replies')
+            .order_by('-created_at') # Newest comments always appear on top
         )
 
-        # 3. Serialize data cleanly
         serializer = VideoCommentSerializer(qs, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
-    
+
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 
-        # Strip 'video' out of raw incoming client payloads to honor write structures
         data = _request_data_as_dict(request.data)
-        data.pop('video', None)
+        data.pop('video', None) # Erase implicit data references from client payload maps
 
-        serializer = VideoCommentCreateSerializer(
-            data=data,
-            context={'request': request},
-        )
+        serializer = VideoCommentCreateSerializer(data=data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
-        # Pass your clean ORM instance straight into the save method
+        # Injects authorized state records directly on save pipeline execution
         comment = serializer.save(author=request.user, video=video)
 
-        # Atomically increment your denormalized cached values
+        # Atomically increments counter values safely
         ShortVideo.objects.filter(pk=pk).update(cached_comments=F('cached_comments') + 1)
 
         return Response(
             VideoCommentSerializer(comment, context={'request': request}).data,
-            status=status.HTTP_201_CREATED,
+            status=status.HTTP_201_CREATED
         )
 
+
+class CommentDetailView(APIView):
+    """
+    PATCH  /api/videos/comments/<pk>/ -> Edit comment
+    DELETE /api/videos/comments/<pk>/ -> Delete comment
+    """
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def _get_own_comment(self, request, pk):
+        comment = get_object_or_404(VideoComment, pk=pk)
+        if comment.author_id != request.user.id:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You do not own modification privileges on this resource.")
+        return comment
+
+    def patch(self, request, pk):
+        comment = self._get_own_comment(request, pk)
+        data = _request_data_as_dict(request.data)
+        data.pop('video', None)
+
+        serializer = VideoCommentCreateSerializer(
+            comment,
+            data=data,
+            partial=True,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        updated = serializer.save(is_edited=True)
+        
+        return Response(VideoCommentSerializer(updated, context={'request': request}).data, status=status.HTTP_200_OK)
+
+    def delete(self, request, pk):
+        comment = self._get_own_comment(request, pk)
+        video_pk = comment.video_id
+        
+        comment.delete()
+        
+        # Atomically decrement comment counters
+        ShortVideo.objects.filter(pk=video_pk).update(cached_comments=F('cached_comments') - 1)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 class CommentRepliesListView(ListAPIView):
     authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticatedOrReadOnly]
@@ -444,41 +485,3 @@ class CommentRepliesListView(ListAPIView):
             .order_by('created_at')
         )
 
-
-class CommentDetailView(APIView):
-    authentication_classes = [TokenAuthentication, SessionAuthentication]
-    permission_classes     = [IsAuthenticated]
-
-    def _get_own_comment(self, request, pk):
-        comment = get_object_or_404(VideoComment, pk=pk)
-        if comment.author_id != request.user.pk:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("You can only edit or delete your own comments.")
-        return comment
-
-    def patch(self, request, pk):
-        comment = self._get_own_comment(request, pk)
-
-        data = _request_data_as_dict(request.data)
-        data.pop('video', None)
-
-        serializer = VideoCommentCreateSerializer(
-            comment,
-            data=data,
-            partial=True,
-            context={'request': request},
-        )
-        serializer.is_valid(raise_exception=True)
-        updated = serializer.save(is_edited=True)
-        return Response(
-            VideoCommentSerializer(updated, context={'request': request}).data
-        )
-
-    def delete(self, request, pk):
-        comment  = self._get_own_comment(request, pk)
-        video_pk = comment.video_id
-        comment.delete()
-        ShortVideo.objects.filter(pk=video_pk).update(
-            cached_comments=F('cached_comments') - 1
-        )
-        return Response(status=status.HTTP_204_NO_CONTENT)
