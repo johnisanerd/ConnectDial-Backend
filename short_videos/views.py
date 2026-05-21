@@ -47,7 +47,7 @@ from django.shortcuts import get_object_or_404
 
 # ── DRF ──────────────────────────────────────────────────────────────────────
 from rest_framework import generics, status
-from rest_framework.authentication import TokenAuthentication
+from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.authtoken.models import Token
 from rest_framework.generics import ListAPIView
 from rest_framework.pagination import LimitOffsetPagination
@@ -204,7 +204,7 @@ class ShortVideoPagination(LimitOffsetPagination):
 
 
 class ShortVideoFeedView(ListAPIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticated]
     serializer_class       = ShortVideoSerializer
     pagination_class       = ShortVideoPagination
@@ -257,7 +257,7 @@ class ShortVideoStreamView(APIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoLikeToggleView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticated]
 
     def post(self, request, pk):
@@ -282,7 +282,7 @@ class VideoLikeToggleView(APIView):
 
 
 class VideoViewRecordView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticated]
 
     def post(self, request, pk):
@@ -302,7 +302,7 @@ class VideoViewRecordView(APIView):
 
 
 class VideoShareRecordView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticated]
 
     def post(self, request, pk):
@@ -352,7 +352,7 @@ class VideoShareRecordView(APIView):
 
 
 class VideoReshareView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticated]
 
     def post(self, request, pk):
@@ -376,7 +376,7 @@ class VideoReshareView(APIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoCommentListCreateView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, pk):
@@ -418,7 +418,7 @@ class VideoCommentListCreateView(APIView):
 
 
 class CommentRepliesListView(ListAPIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticatedOrReadOnly]
     serializer_class       = VideoCommentSerializer
 
@@ -436,7 +436,7 @@ class CommentRepliesListView(ListAPIView):
 
 
 class CommentDetailView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticated]
 
     def _get_own_comment(self, request, pk):
