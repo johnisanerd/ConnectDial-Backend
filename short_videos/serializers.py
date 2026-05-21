@@ -69,6 +69,8 @@ class VideoCommentSerializer(serializers.ModelSerializer):
     author_details = serializers.SerializerMethodField()
     mentions       = CommentMentionSerializer(many=True, read_only=True)
     reply_count    = serializers.SerializerMethodField()
+    # FIX: expose 'content' alias for 'body' so RN frontend c.content works
+    content        = serializers.CharField(source='body', read_only=True)
 
     class Meta:
         model  = VideoComment
@@ -77,6 +79,7 @@ class VideoCommentSerializer(serializers.ModelSerializer):
             'video',
             'author_details',
             'body',
+            'content',
             'mentions',
             'reply_count',
             'created_at',
@@ -109,18 +112,38 @@ class VideoCommentSerializer(serializers.ModelSerializer):
 
 
 class VideoCommentCreateSerializer(serializers.ModelSerializer):
-    """Write serializer for creating / updating comments"""
+    """
+    Write serializer for creating / updating comments.
+
+    FIX: The React Native frontend sends { content: "..." } but the model
+    field is `body`. We accept both by mapping `content` → `body` in
+    validate() so no model migration is required.
+    """
+    # Accept 'content' from the frontend as a write-only alias for 'body'
+    content = serializers.CharField(required=False, write_only=True)
+
     class Meta:
         model  = VideoComment
-        fields = ['id', 'video', 'parent', 'body']
+        fields = ['id', 'video', 'parent', 'body', 'content']
         read_only_fields = ['id']
+        extra_kwargs = {
+            'body': {'required': False},  # not required; content may be used instead
+        }
 
-    def validate_body(self, value):
-        if not value or not value.strip():
-            raise serializers.ValidationError("Comment body cannot be empty.")
-        if len(value) > 1000:
-            raise serializers.ValidationError("Comment is too long (max 1000 characters).")
-        return value.strip()
+    def validate(self, attrs):
+        # Map 'content' → 'body' if frontend sent content instead of body
+        if 'content' in attrs and not attrs.get('body'):
+            attrs['body'] = attrs.pop('content')
+        else:
+            attrs.pop('content', None)
+
+        body = attrs.get('body', '')
+        if not body or not body.strip():
+            raise serializers.ValidationError({'content': 'Comment cannot be empty.'})
+        if len(body) > 1000:
+            raise serializers.ValidationError({'content': 'Comment is too long (max 1000 characters).'})
+        attrs['body'] = body.strip()
+        return attrs
 
     def validate_parent(self, value):
         if value and value.parent_id is not None:
