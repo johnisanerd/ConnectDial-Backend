@@ -66,21 +66,24 @@ class VideoCommentSerializer(serializers.ModelSerializer):
     mentions       = CommentMentionSerializer(many=True, read_only=True)
     reply_count    = serializers.SerializerMethodField()
     content        = serializers.SerializerMethodField() # Changed to a safe Method Field
+    # This completely bypasses DRF's implicit primary key relationship serializer type crash!
+    video_id       = serializers.ReadOnlyField(source='video.id')
 
     class Meta:
         model  = VideoComment
         fields = [
             'id',
-            'video',
+            'video_id',     # ✅ Swapped out from 'video'
             'author_details',
             'body',
-            'content',      # Safe alias target for React Native frontend
+            'content',      
             'mentions',
             'reply_count',
             'created_at',
             'is_edited',
         ]
         read_only_fields = ['id', 'created_at', 'is_edited']
+
 
     def get_content(self, obj):
         # Gracefully handle the db_column='text' field extraction proxy
