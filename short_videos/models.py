@@ -1,6 +1,6 @@
 """
-ConnectDial — Short Video Models
-=================================
+ConnectDial — Short Video Models (Fixed Storages)
+=================================================
 Covers:
   - ShortVideo        : the core video entity (0s – 7200s / 2 hrs)
   - VideoLike         : user like on a video
@@ -8,12 +8,6 @@ Covers:
   - CommentMention    : M2M through-table for @tagged users in comments
   - VideoShare        : share action
   - VideoView         : view event with watch_time for completion tracking
-
-Fixes applied
-─────────────
-  - Fixed standard Django model field constraints by discarding 'db_column=user_id'.
-  - Cleaned global environment checks by adding dynamic django.core.storages resolution loops.
-  - Retained optimized vertical index composites for fast list extraction.
 """
 
 import uuid
@@ -21,7 +15,6 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.core.files.storage import default_storage
 from leagues.models import League, Team
 
 
@@ -61,11 +54,11 @@ class ShortVideo(models.Model):
         related_name='short_videos',
     )
     
-    # Safe storage verification loop prevents dynamic module parsing errors during initialization
-    video = models.FileField(
-        upload_to=short_video_upload_path,
-        storage=storages.backends.gcloud.GoogleCloudStorage() if hasattr(storages, 'backends') else None
-    )
+    # ✅ FIXED: Removed the direct 'storages' block. Django will automatically
+    # look at your settings.py and route this file straight to Firebase GCS!
+    video = models.FileField(upload_to=short_video_upload_path)
+    
+    # ✅ FIXED: Thumbnails will also seamlessly use your default Firebase GCS storage choice now
     thumbnail = models.ImageField(upload_to='shorts/thumbnails/', blank=True, null=True)
     caption   = models.TextField(blank=True, max_length=2200)
 
@@ -164,7 +157,7 @@ class VideoLike(models.Model):
 
 class VideoComment(models.Model):
     """
-    Comment on a ShortVideo with optimal threading structures.
+    Comment on a ShortVideo with optional threading structures.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     video = models.ForeignKey(
@@ -173,8 +166,6 @@ class VideoComment(models.Model):
         related_name='comments',
         db_index=True
     )
-    
-    # ✅ FIXED CRITICAL MODEL BUG: Removed the legacy broken db_column attribute configuration block
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -187,8 +178,6 @@ class VideoComment(models.Model):
         on_delete=models.CASCADE, 
         related_name='replies'
     )
-    
-    # Keeps 'text' as the column mapping parameter while exposing 'body' natively to Python
     body = models.TextField(max_length=1000, db_column='text')
     
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -233,7 +222,7 @@ class VideoShare(models.Model):
         ('facebook',  'Facebook'),
         ('instagram', 'Instagram'),
         ('copy_link', 'Copy Link'),
-        ('reshare',   'In-App Reshare'),   # FIX-2
+        ('reshare',   'In-App Reshare'),
         ('other',     'Other'),
     ]
 
@@ -272,9 +261,6 @@ class VideoView(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        """
-        Auto-compute `completed` before saving.
-        """
         duration = self.video.duration if self.video_id else 0
         if duration > 0:
             self.completed = self.watch_time >= (duration * 0.9)

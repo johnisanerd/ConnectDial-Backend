@@ -399,7 +399,8 @@ class CommentRepliesListView(ListAPIView):
     GET /api/videos/shorts/<pk>/comments/<comment_pk>/replies/ -> Optimized sub-threads
     """
     authentication_classes = [TokenAuthentication, SessionAuthentication]
-    permission_classes     = [IsAuthenticatedOrReadOnly]
+    # ✅ FIX: Explicitly add this line to override the global IsAuthenticated block
+    permission_classes     = [IsAuthenticatedOrReadOnly] 
     serializer_class       = VideoCommentSerializer
 
     def get_queryset(self):
@@ -413,7 +414,6 @@ class CommentRepliesListView(ListAPIView):
             .prefetch_related('author__fan_preferences', 'author__fan_preferences__team')
             .order_by('created_at')
         )
-
 
 class CommentDetailView(APIView):
     """
