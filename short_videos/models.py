@@ -172,7 +172,6 @@ class VideoComment(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='video_comments',
-        db_column='user_id', # Bridges the column mismatch safely without breaking the DB schema
     )
     parent = models.ForeignKey(
         'self', 
