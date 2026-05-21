@@ -104,7 +104,6 @@ class ShortVideoUploadView(generics.CreateAPIView):
     def perform_create(self, serializer):
         video_file = self.request.FILES.get('file') or self.request.FILES.get('video')
 
-        # Resolve league
         league = None
         league_id = self.request.data.get('league_id') or self.request.data.get('league')
         if league_id:
@@ -114,7 +113,6 @@ class ShortVideoUploadView(generics.CreateAPIView):
             except Exception:
                 pass
 
-        # Save raw file to temp
         tmp_path = None
         if video_file:
             suffix = os.path.splitext(video_file.name or '')[-1] or '.mp4'
@@ -123,7 +121,6 @@ class ShortVideoUploadView(generics.CreateAPIView):
                     tmp.write(chunk)
                 tmp_path = tmp.name
 
-        # Create draft instance
         instance = serializer.save(
             author=self.request.user,
             duration=0,
@@ -131,13 +128,11 @@ class ShortVideoUploadView(generics.CreateAPIView):
             status='draft',
         )
 
-        # Background processing
         if tmp_path:
             try:
                 from .tasks import process_short_video
                 process_short_video.delay(str(instance.pk), tmp_path)
             except Exception:
-                # Fallback to thread
                 t = threading.Thread(
                     target=self._save_raw_and_publish,
                     args=(instance, tmp_path),
@@ -152,11 +147,7 @@ class ShortVideoUploadView(generics.CreateAPIView):
             duration = extract_duration(tmp_path)
 
             with open(tmp_path, 'rb') as f:
-                instance.video.save(
-                    os.path.basename(tmp_path),
-                    File(f),
-                    save=False
-                )
+                instance.video.save(os.path.basename(tmp_path), File(f), save=False)
 
             instance.duration = duration
             instance.status = 'published'
@@ -252,7 +243,6 @@ class VideoLikeToggleView(APIView):
             video.refresh_from_db(fields=['cached_likes'])
             return Response({'liked': True, 'likes_count': video.cached_likes}, status=status.HTTP_201_CREATED)
 
-        # Unlike
         like.delete()
         ShortVideo.objects.filter(pk=pk).update(cached_likes=F('cached_likes') - 1)
         video.refresh_from_db(fields=['cached_likes'])
@@ -336,7 +326,7 @@ class VideoReshareView(APIView):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMMENTS - FIXED VERSION
+# COMMENTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoCommentListCreateView(APIView):
@@ -350,13 +340,12 @@ class VideoCommentListCreateView(APIView):
             video=video, parent__isnull=True
         ).select_related('author')
 
-        # Defensive profile prefetch
+        # Defensive prefetch to prevent 500 errors
         try:
             queryset = queryset.select_related('author__profile')
         except Exception:
             pass
 
-        # Defensive mentions prefetch
         try:
             queryset = queryset.prefetch_related('mentions__user', 'replies')
         except Exception:
@@ -378,7 +367,7 @@ class VideoCommentListCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         comment = serializer.save(author=request.user)
 
-        # Update counter safely
+        # Increment cached counter
         ShortVideo.objects.filter(pk=pk).update(
             cached_comments=F('cached_comments') + 1
         )
@@ -393,7 +382,7 @@ class CommentRepliesListView(ListAPIView):
     serializer_class       = VideoCommentSerializer
 
     def get_queryset(self):
-        video_pk = self.kwargs['pk']
+        video_pk   = self.kwargs['pk']
         comment_pk = self.kwargs['comment_pk']
 
         queryset = VideoComment.objects.filter(
@@ -427,7 +416,8 @@ class CommentDetailView(APIView):
     def patch(self, request, pk):
         comment = self._get_own_comment(request, pk)
         serializer = VideoCommentCreateSerializer(
-            comment, data=request.data, partial=True, context={'request': request}
+            comment, data=request.data, partial=True,
+            context={'request': request},
         )
         serializer.is_valid(raise_exception=True)
         updated = serializer.save(is_edited=True)
