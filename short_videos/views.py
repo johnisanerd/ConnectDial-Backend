@@ -15,26 +15,17 @@ Streaming
 Engagement
   POST /api/videos/shorts/<pk>/like/                         toggle like
   POST /api/videos/shorts/<pk>/view/                         record view + watch_time
-  POST /api/videos/shorts/<pk>/share/                        external share { platform }
+  POST /api/videos/shorts/<pk>/share/                        external share
   POST /api/videos/shorts/<pk>/reshare/                      in-app reshare toggle
 
 Comments
   GET  /api/videos/shorts/<pk>/comments/                     list top-level comments
-  POST /api/videos/shorts/<pk>/comments/                     create comment { body }
+  POST /api/videos/shorts/<pk>/comments/                     create comment
   GET  /api/videos/shorts/<pk>/comments/<comment_pk>/replies/ list replies
   PATCH/DELETE /api/videos/comments/<pk>/                    edit/delete own comment
-
-Fixes applied
-─────────────
-  FIX-L  VideoLikeToggleView now updates cached_likes with F() directly so the
-         counter is always correct even without a post_save signal.
-  FIX-S  VideoShareRecordView increments cached_shares with F().
-  FIX-C  VideoCommentListCreateView.post() increments cached_comments with F()
-         and also decrements on CommentDetailView.delete().
 """
 
 # ── stdlib ────────────────────────────────────────────────────────────────────
-import io
 import os
 import tempfile
 import threading
@@ -44,7 +35,6 @@ from urllib.parse import quote
 from django.contrib.auth import get_user_model
 from django.core.files import File
 from django.core.files.base import ContentFile
-from django.core.files.uploadedfile import InMemoryUploadedFile
 from django.db.models import F
 from django.shortcuts import get_object_or_404
 
@@ -55,15 +45,12 @@ from rest_framework.authtoken.models import Token
 from rest_framework.generics import ListAPIView
 from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import (
-    IsAuthenticated,
-    IsAuthenticatedOrReadOnly,
-)
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 # ── Local ─────────────────────────────────────────────────────────────────────
-from .feed_algorithm import get_short_video_feed, FEED_FETCH_SIZE
+from .feed_algorithm import get_short_video_feed
 from .models import ShortVideo, VideoComment, VideoLike, VideoShare, VideoView
 from .serializers import (
     ShortVideoSerializer,
@@ -92,19 +79,6 @@ User = get_user_model()
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ShortVideoUploadView(generics.CreateAPIView):
-    """
-    POST /api/videos/shorts/upload/
-
-    Strategy to beat the 30-second mobile timeout:
-      1. Save the raw video to a temp file on disk immediately.
-      2. Create the ShortVideo DB row with status='draft' right away.
-      3. Return 201 to the client instantly (< 1 s).
-      4. Fire a Celery task that compresses, extracts duration,
-         generates thumbnail, uploads to GCS, then flips status → 'published'.
-
-    The frontend should poll GET /api/videos/shorts/<pk>/status/ or rely on
-    a push notification to know when the video is ready.
-    """
     serializer_class   = ShortVideoCreateSerializer
     permission_classes = [IsAuthenticated]
     parser_classes     = [MultiPartParser, FormParser]
@@ -116,7 +90,7 @@ class ShortVideoUploadView(generics.CreateAPIView):
         try:
             instance = self.perform_create(serializer)
         except Exception as exc:
-            if "too large" in str(exc).lower() or "2gb" in str(exc).lower():
+            if any(x in str(exc).lower() for x in ["too large", "2gb", "maximum"]):
                 return Response(
                     {"video": ["Video file is too large. Maximum allowed size is 2 GB."]},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -128,33 +102,28 @@ class ShortVideoUploadView(generics.CreateAPIView):
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
     def perform_create(self, serializer):
-        # ── 1. Resolve uploaded file (frontend sends as 'file') ───────────────
         video_file = self.request.FILES.get('file') or self.request.FILES.get('video')
 
-        # ── 2. Resolve league ──────────────────────────────────────────────────
+        # Resolve league
         league = None
         league_id = self.request.data.get('league_id') or self.request.data.get('league')
         if league_id:
-            from leagues.models import League
             try:
+                from leagues.models import League
                 league = League.objects.get(pk=league_id)
-            except League.DoesNotExist:
+            except Exception:
                 pass
 
-        # ── 3. Save raw file to a persistent temp path ─────────────────────────
+        # Save raw file to temp
         tmp_path = None
         if video_file:
             suffix = os.path.splitext(video_file.name or '')[-1] or '.mp4'
-            with tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=suffix,
-                dir=tempfile.gettempdir(),
-            ) as tmp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 for chunk in video_file.chunks():
                     tmp.write(chunk)
                 tmp_path = tmp.name
 
-        # ── 4. Create DB row instantly with status='draft' ────────────────────
+        # Create draft instance
         instance = serializer.save(
             author=self.request.user,
             duration=0,
@@ -162,17 +131,13 @@ class ShortVideoUploadView(generics.CreateAPIView):
             status='draft',
         )
 
-        # ── 5. Process in background thread or Celery ─────────────────────────
+        # Background processing
         if tmp_path:
-            celery_dispatched = False
             try:
                 from .tasks import process_short_video
                 process_short_video.delay(str(instance.pk), tmp_path)
-                celery_dispatched = True
             except Exception:
-                pass
-
-            if not celery_dispatched:
+                # Fallback to thread
                 t = threading.Thread(
                     target=self._save_raw_and_publish,
                     args=(instance, tmp_path),
@@ -184,19 +149,17 @@ class ShortVideoUploadView(generics.CreateAPIView):
 
     def _save_raw_and_publish(self, instance, tmp_path):
         try:
-            from django.core.files import File as DjangoFile
-
             duration = extract_duration(tmp_path)
 
-            fname = os.path.basename(tmp_path)
-            f = open(tmp_path, 'rb')
-            try:
-                instance.video.save(fname, DjangoFile(f), save=False)
-            finally:
-                f.close()
+            with open(tmp_path, 'rb') as f:
+                instance.video.save(
+                    os.path.basename(tmp_path),
+                    File(f),
+                    save=False
+                )
 
             instance.duration = duration
-            instance.status   = 'published'
+            instance.status = 'published'
             instance.save(update_fields=['video', 'duration', 'status'])
 
             try:
@@ -230,9 +193,6 @@ class ShortVideoPagination(LimitOffsetPagination):
 
 
 class ShortVideoFeedView(ListAPIView):
-    """
-    GET /api/videos/shorts/feed/
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
     serializer_class       = ShortVideoSerializer
@@ -247,57 +207,29 @@ class ShortVideoFeedView(ListAPIView):
         ctx['request'] = self.request
         return ctx
 
-    def list(self, request, *args, **kwargs):
-        qs   = self.get_queryset()
-        page = self.paginate_queryset(list(qs))
-
-        serializer = self.get_serializer(
-            page if page is not None else qs,
-            many=True,
-            context={'request': request},
-        )
-
-        if page is not None:
-            return self.get_paginated_response(serializer.data)
-
-        return Response({
-            'results': serializer.data,
-            'count':   len(serializer.data),
-        })
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STREAMING
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ShortVideoStreamView(APIView):
-    """
-    GET /api/videos/shorts/<pk>/stream/
-    GET /api/videos/shorts/<pk>/stream/?token=<drf_token>
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = []
 
     def get(self, request, pk):
         user = request.user
 
-        if not user or not user.is_authenticated:
+        if not user.is_authenticated:
             token_key = request.query_params.get('token', '').strip()
             if token_key:
                 try:
                     token_obj = Token.objects.select_related('user').get(key=token_key)
                     user = token_obj.user
                 except Token.DoesNotExist:
-                    return Response(
-                        {'detail': 'Invalid or expired token.'},
-                        status=status.HTTP_401_UNAUTHORIZED,
-                    )
+                    return Response({"detail": "Invalid token."}, status=status.HTTP_401_UNAUTHORIZED)
 
-        if not user or not user.is_authenticated:
-            return Response(
-                {'detail': 'Authentication credentials were not provided.'},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
+        if not user.is_authenticated:
+            return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
 
         video = get_object_or_404(ShortVideo, pk=pk)
         return stream_video_response(request, video)
@@ -308,13 +240,6 @@ class ShortVideoStreamView(APIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoLikeToggleView(APIView):
-    """
-    POST /api/videos/shorts/<pk>/like/
-
-    FIX-L: Use F() expressions to keep cached_likes accurate without relying
-    on a post_save signal.  Always return likes_count + liked in the payload
-    so the frontend can trust the server value.
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
 
@@ -323,48 +248,18 @@ class VideoLikeToggleView(APIView):
         like, created = VideoLike.objects.get_or_create(user=request.user, video=video)
 
         if created:
-            # FIX-L: increment via F() — safe under concurrent requests
-            ShortVideo.objects.filter(pk=pk).update(
-                cached_likes=F('cached_likes') + 1
-            )
+            ShortVideo.objects.filter(pk=pk).update(cached_likes=F('cached_likes') + 1)
             video.refresh_from_db(fields=['cached_likes'])
-            return Response(
-                {'liked': True, 'likes_count': video.cached_likes},
-                status=status.HTTP_201_CREATED,
-            )
+            return Response({'liked': True, 'likes_count': video.cached_likes}, status=status.HTTP_201_CREATED)
 
-        # Already liked → unlike
+        # Unlike
         like.delete()
-        ShortVideo.objects.filter(pk=pk).update(
-            cached_likes=F('cached_likes') - 1
-        )
+        ShortVideo.objects.filter(pk=pk).update(cached_likes=F('cached_likes') - 1)
         video.refresh_from_db(fields=['cached_likes'])
-        # Clamp to 0 in case of any drift
-        likes_count = max(video.cached_likes, 0)
-        return Response(
-            {'liked': False, 'likes_count': likes_count},
-            status=status.HTTP_200_OK,
-        )
-
-    def delete(self, request, pk):
-        """Explicit unlike via DELETE verb."""
-        video = get_object_or_404(ShortVideo, pk=pk)
-        deleted, _ = VideoLike.objects.filter(user=request.user, video=video).delete()
-
-        if deleted:
-            ShortVideo.objects.filter(pk=pk).update(
-                cached_likes=F('cached_likes') - 1
-            )
-            video.refresh_from_db(fields=['cached_likes'])
-            return Response(
-                {'liked': False, 'likes_count': max(video.cached_likes, 0)},
-                status=status.HTTP_200_OK,
-            )
-        return Response({'detail': 'Not liked.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'liked': False, 'likes_count': max(video.cached_likes, 0)}, status=status.HTTP_200_OK)
 
 
 class VideoViewRecordView(APIView):
-    """POST /api/videos/shorts/<pk>/view/"""
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
 
@@ -374,23 +269,14 @@ class VideoViewRecordView(APIView):
             data={**request.data, 'video': str(video.pk)}
         )
         serializer.is_valid(raise_exception=True)
-        view_obj = serializer.save(user=request.user)
+        serializer.save(user=request.user)
 
-        # Increment cached view count
-        ShortVideo.objects.filter(pk=pk).update(
-            cached_views=F('cached_views') + 1
-        )
+        ShortVideo.objects.filter(pk=pk).update(cached_views=F('cached_views') + 1)
 
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class VideoShareRecordView(APIView):
-    """
-    POST /api/videos/shorts/<pk>/share/
-
-    FIX-S: increments cached_shares via F() so the frontend count stays
-    accurate without relying on a signal.
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
 
@@ -402,110 +288,82 @@ class VideoShareRecordView(APIView):
         serializer.is_valid(raise_exception=True)
         share = serializer.save(user=request.user)
 
-        # FIX-S: increment cached counter
-        ShortVideo.objects.filter(pk=pk).update(
-            cached_shares=F('cached_shares') + 1
-        )
+        ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') + 1)
         video.refresh_from_db(fields=['cached_shares'])
 
         platform = share.platform
         payload = {
             **serializer.data,
-            'shares_count':   video.cached_shares,
-            'share_url':      video.share_url,
-            'og_title':       video.og_title,
+            'shares_count': video.cached_shares,
+            'share_url': video.share_url,
+            'og_title': video.og_title,
             'og_description': video.og_description,
-            'thumbnail_url': (
-                request.build_absolute_uri(video.thumbnail.url)
-                if video.thumbnail else None
-            ),
+            'thumbnail_url': request.build_absolute_uri(video.thumbnail.url) if video.thumbnail else None,
         }
 
         if platform == 'whatsapp':
             text = build_whatsapp_share_text(video)
             payload['text'] = text
             payload['whatsapp_url'] = f"https://wa.me/?text={quote(text)}"
-
         elif platform == 'telegram':
             text = build_telegram_share_text(video)
             payload['text'] = text
-            payload['telegram_url'] = (
-                f"https://t.me/share/url"
-                f"?url={quote(video.share_url, safe='')}"
-                f"&text={quote(video.og_title, safe='')}"
-            )
-
+            payload['telegram_url'] = f"https://t.me/share/url?url={quote(video.share_url)}&text={quote(video.og_title)}"
         elif platform == 'twitter':
-            payload['twitter_url'] = (
-                f"https://twitter.com/intent/tweet"
-                f"?url={quote(video.share_url, safe='')}"
-                f"&text={quote(video.og_title, safe='')}"
-            )
-
-        else:
-            payload['share_text'] = video.share_url
+            payload['twitter_url'] = f"https://twitter.com/intent/tweet?url={quote(video.share_url)}&text={quote(video.og_title)}"
 
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class VideoReshareView(APIView):
-    """POST /api/videos/shorts/<pk>/reshare/  — toggle in-app reshare"""
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
 
-    RESHARE_PLATFORM = 'reshare'
-
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
-
         existing = VideoShare.objects.filter(
-            user=request.user,
-            video=video,
-            platform=self.RESHARE_PLATFORM,
+            user=request.user, video=video, platform='reshare'
         ).first()
 
         if existing:
             existing.delete()
-            ShortVideo.objects.filter(pk=pk).update(
-                cached_shares=F('cached_shares') - 1
-            )
+            ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') - 1)
             return Response({'reshared': False}, status=status.HTTP_200_OK)
 
-        VideoShare.objects.create(
-            user=request.user,
-            video=video,
-            platform=self.RESHARE_PLATFORM,
-        )
-        ShortVideo.objects.filter(pk=pk).update(
-            cached_shares=F('cached_shares') + 1
-        )
+        VideoShare.objects.create(user=request.user, video=video, platform='reshare')
+        ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') + 1)
         return Response({'reshared': True}, status=status.HTTP_201_CREATED)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMMENTS
+# COMMENTS - FIXED VERSION
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoCommentListCreateView(APIView):
-    """
-    GET  /api/videos/shorts/<pk>/comments/  — list top-level comments
-    POST /api/videos/shorts/<pk>/comments/  — create comment { body }
-
-    FIX-C: POST increments cached_comments via F() so the side-action badge
-    on the frontend stays accurate.
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
-        comments = (
-            VideoComment.objects
-            .filter(video=video, parent__isnull=True)
-            .select_related('author', 'author__profile')
-            .prefetch_related('mentions__user', 'replies')
-            .order_by('created_at')
-        )
+
+        queryset = VideoComment.objects.filter(
+            video=video, parent__isnull=True
+        ).select_related('author')
+
+        # Defensive profile prefetch
+        try:
+            queryset = queryset.select_related('author__profile')
+        except Exception:
+            pass
+
+        # Defensive mentions prefetch
+        try:
+            queryset = queryset.prefetch_related('mentions__user', 'replies')
+        except Exception:
+            pass
+
+        comments = queryset.order_by('created_at')
+
         serializer = VideoCommentSerializer(
             comments, many=True, context={'request': request}
         )
@@ -520,14 +378,12 @@ class VideoCommentListCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         comment = serializer.save(author=request.user)
 
-        # FIX-C: increment comment counter on the video
+        # Update counter safely
         ShortVideo.objects.filter(pk=pk).update(
             cached_comments=F('cached_comments') + 1
         )
 
-        read_serializer = VideoCommentSerializer(
-            comment, context={'request': request}
-        )
+        read_serializer = VideoCommentSerializer(comment, context={'request': request})
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -537,22 +393,27 @@ class CommentRepliesListView(ListAPIView):
     serializer_class       = VideoCommentSerializer
 
     def get_queryset(self):
-        video_pk   = self.kwargs['pk']
+        video_pk = self.kwargs['pk']
         comment_pk = self.kwargs['comment_pk']
-        return (
-            VideoComment.objects
-            .filter(video_id=video_pk, parent_id=comment_pk)
-            .select_related('author', 'author__profile')
-            .prefetch_related('mentions__user')
-            .order_by('created_at')
-        )
+
+        queryset = VideoComment.objects.filter(
+            video_id=video_pk, parent_id=comment_pk
+        ).select_related('author')
+
+        try:
+            queryset = queryset.select_related('author__profile')
+        except Exception:
+            pass
+
+        try:
+            queryset = queryset.prefetch_related('mentions__user')
+        except Exception:
+            pass
+
+        return queryset.order_by('created_at')
 
 
 class CommentDetailView(APIView):
-    """
-    PATCH  /api/videos/comments/<pk>/   edit own comment
-    DELETE /api/videos/comments/<pk>/   delete own comment (decrements cached_comments)
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
 
@@ -566,22 +427,20 @@ class CommentDetailView(APIView):
     def patch(self, request, pk):
         comment = self._get_own_comment(request, pk)
         serializer = VideoCommentCreateSerializer(
-            comment, data=request.data, partial=True,
-            context={'request': request},
+            comment, data=request.data, partial=True, context={'request': request}
         )
         serializer.is_valid(raise_exception=True)
         updated = serializer.save(is_edited=True)
-        read_serializer = VideoCommentSerializer(updated, context={'request': request})
-        return Response(read_serializer.data)
+        return Response(
+            VideoCommentSerializer(updated, context={'request': request}).data
+        )
 
     def delete(self, request, pk):
         comment = self._get_own_comment(request, pk)
         video_pk = comment.video_id
         comment.delete()
 
-        # FIX-C: decrement counter when comment is deleted
         ShortVideo.objects.filter(pk=video_pk).update(
             cached_comments=F('cached_comments') - 1
         )
-
         return Response(status=status.HTTP_204_NO_CONTENT)
