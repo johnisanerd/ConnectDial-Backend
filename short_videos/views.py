@@ -387,35 +387,22 @@ class VideoCommentListCreateView(APIView):
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, pk):
+        # 1. Make sure the video instance exists safely
         video = get_object_or_404(ShortVideo, pk=pk)
 
-        # Target only root comments
-        queryset = (
+        # 2. Pull root comments using a stable, single join query setup
+        qs = (
             VideoComment.objects
             .filter(video=video, parent__isnull=True)
+            .select_related('author') # Clean single join, no unstable double profiles
+            .prefetch_related('mentions__user', 'replies')
             .order_by('created_at')
         )
 
-        try:
-            # 1. Attempt deep query relational optimization parameters
-            qs = (
-                queryset
-                .select_related('author', 'author__profile')
-                .prefetch_related('mentions__user', 'replies')
-            )
-            # Safe evaluation trick to catch field relation spelling anomalies or mismatch issues
-            str(qs.query)
-        except Exception:
-            # 2. Resilient Fallback: If your custom user profile name doesn't match, drop the select_related join
-            qs = (
-                queryset
-                .select_related('author')
-                .prefetch_related('mentions__user', 'replies')
-            )
-
+        # 3. Serialize data cleanly
         serializer = VideoCommentSerializer(qs, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
-
+    
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 

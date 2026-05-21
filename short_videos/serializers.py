@@ -57,23 +57,21 @@ class CommentMentionSerializer(serializers.ModelSerializer):
 # serializers.py
 # =============================================================================
 
+# serializers.py
+# ─────────────────────────────────────────────────────────────────────────────
+
 class VideoCommentSerializer(serializers.ModelSerializer):
-    """
-    Read serializer returned to the frontend after GET or POST.
-    Exposes both 'body' and 'content' safely without causing duplicate attribute compilation bugs.
-    """
     author_details = serializers.SerializerMethodField()
     mentions       = CommentMentionSerializer(many=True, read_only=True)
     reply_count    = serializers.SerializerMethodField()
-    content        = serializers.SerializerMethodField() # Changed to a safe Method Field
-    # This completely bypasses DRF's implicit primary key relationship serializer type crash!
+    content        = serializers.SerializerMethodField()
     video_id       = serializers.ReadOnlyField(source='video.id')
 
     class Meta:
         model  = VideoComment
         fields = [
             'id',
-            'video_id',     # ✅ Swapped out from 'video'
+            'video_id',
             'author_details',
             'body',
             'content',      
@@ -84,44 +82,41 @@ class VideoCommentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'is_edited']
 
-
     def get_content(self, obj):
-        # Gracefully handle the db_column='text' field extraction proxy
         return obj.body if obj.body else ""
-
-# serializers.py
-# =============================================================================
 
     def get_author_details(self, obj):
         request = self.context.get('request')
         author = obj.author
         
-        avatar_url = None
-        
-        # Check if the author object is empty or anonymous to prevent attribute failures
         if not author or author.is_anonymous:
             return {
                 'id': None,
-                'username': 'anonymous',
-                'display_name': 'Anonymous User',
+                'username': 'Anonymous',
+                'display_name': 'Anonymous',
                 'profile_pic': None,
             }
 
         display_name = author.username
+        avatar_url = None
+
+        # Safe attribute scanning — guards against missing relationship targets completely
         profile = getattr(author, 'profile', None)
         if not profile:
+            # Check fallback configurations
             profile = getattr(author, 'userprofile', None) or getattr(author, 'user_profile', None)
 
         if profile:
             display_name = getattr(profile, 'display_name', author.username)
-            try:
-                if getattr(profile, 'avatar', None):
+            avatar_field = getattr(profile, 'avatar', None)
+            if avatar_field and hasattr(avatar_field, 'url'):
+                try:
                     avatar_url = (
-                        request.build_absolute_uri(profile.avatar.url)
-                        if request else profile.avatar.url
+                        request.build_absolute_uri(avatar_field.url)
+                        if request else avatar_field.url
                     )
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
         return {
             'id':           author.id,
