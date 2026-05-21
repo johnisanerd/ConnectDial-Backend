@@ -324,9 +324,8 @@ class VideoReshareView(APIView):
         ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') + 1)
         return Response({'reshared': True}, status=status.HTTP_201_CREATED)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# COMMENTS
+# COMMENTS - Clean & Defensive
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoCommentListCreateView(APIView):
@@ -340,7 +339,7 @@ class VideoCommentListCreateView(APIView):
             video=video, parent__isnull=True
         ).select_related('author')
 
-        # Defensive prefetch to prevent 500 errors
+        # Defensive profile prefetch
         try:
             queryset = queryset.select_related('author__profile')
         except Exception:
@@ -353,25 +352,26 @@ class VideoCommentListCreateView(APIView):
 
         comments = queryset.order_by('created_at')
 
-        serializer = VideoCommentSerializer(
-            comments, many=True, context={'request': request}
-        )
+        serializer = VideoCommentSerializer(comments, many=True, context={'request': request})
         return Response(serializer.data)
 
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
+
         serializer = VideoCommentCreateSerializer(
-            data={**request.data, 'video': str(video.pk)},
-            context={'request': request},
+            data={**request.data, 'video': video.pk},
+            context={'request': request}
         )
         serializer.is_valid(raise_exception=True)
+
         comment = serializer.save(author=request.user)
 
-        # Increment cached counter
+        # Update cached count
         ShortVideo.objects.filter(pk=pk).update(
             cached_comments=F('cached_comments') + 1
         )
 
+        # Return full serialized comment
         read_serializer = VideoCommentSerializer(comment, context={'request': request})
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -382,11 +382,9 @@ class CommentRepliesListView(ListAPIView):
     serializer_class       = VideoCommentSerializer
 
     def get_queryset(self):
-        video_pk   = self.kwargs['pk']
-        comment_pk = self.kwargs['comment_pk']
-
         queryset = VideoComment.objects.filter(
-            video_id=video_pk, parent_id=comment_pk
+            video_id=self.kwargs['pk'],
+            parent_id=self.kwargs['comment_pk']
         ).select_related('author')
 
         try:
@@ -416,8 +414,7 @@ class CommentDetailView(APIView):
     def patch(self, request, pk):
         comment = self._get_own_comment(request, pk)
         serializer = VideoCommentCreateSerializer(
-            comment, data=request.data, partial=True,
-            context={'request': request},
+            comment, data=request.data, partial=True, context={'request': request}
         )
         serializer.is_valid(raise_exception=True)
         updated = serializer.save(is_edited=True)

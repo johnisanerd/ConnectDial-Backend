@@ -47,24 +47,35 @@ class CommentMentionSerializer(serializers.ModelSerializer):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMMENTS
+# COMMENTS - Improved to match Post/Comment style
 # ─────────────────────────────────────────────────────────────────────────────
 
+class MentionedUserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = User
+        fields = ['id', 'username']
+
+
+class CommentMentionSerializer(serializers.ModelSerializer):
+    user = MentionedUserSerializer(read_only=True)
+
+    class Meta:
+        model  = CommentMention
+        fields = ['user']
+
+
 class VideoCommentSerializer(serializers.ModelSerializer):
-    """Read serializer for a comment."""
-    author_username = serializers.CharField(source='author.username', read_only=True)
-    author_avatar   = serializers.SerializerMethodField()
-    mentions        = CommentMentionSerializer(many=True, read_only=True)
-    reply_count     = serializers.SerializerMethodField()
+    """Read serializer - consistent with Post Comment style"""
+    author_details = serializers.SerializerMethodField()
+    mentions       = CommentMentionSerializer(many=True, read_only=True)
+    reply_count    = serializers.SerializerMethodField()
 
     class Meta:
         model  = VideoComment
         fields = [
             'id',
             'video',
-            'author_username',
-            'author_avatar',
-            'parent',
+            'author_details',
             'body',
             'mentions',
             'reply_count',
@@ -73,23 +84,32 @@ class VideoCommentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'is_edited']
 
-    def get_author_avatar(self, obj):
+    def get_author_details(self, obj):
+        """Consistent author object like in PostSerializer"""
         request = self.context.get('request')
+        profile = getattr(obj.author, 'profile', None)
+
+        avatar_url = None
         try:
-            if obj.author.profile.avatar:
-                url = obj.author.profile.avatar.url
-                return request.build_absolute_uri(url) if request else url
+            if profile and profile.avatar:
+                avatar_url = request.build_absolute_uri(profile.avatar.url) if request else profile.avatar.url
         except Exception:
             pass
-        return None
+
+        return {
+            'id':           obj.author.id,
+            'username':     obj.author.username,
+            'display_name': getattr(profile, 'display_name', obj.author.username),
+            'profile_pic':  avatar_url,
+            'is_following': False,  # Can be enhanced later with annotation
+        }
 
     def get_reply_count(self, obj):
-        return obj.replies.count()
+        return obj.replies.count() if hasattr(obj, 'replies') else 0
 
 
 class VideoCommentCreateSerializer(serializers.ModelSerializer):
-    """Write serializer for creating / updating a comment."""
-
+    """Write serializer for creating / updating comments"""
     class Meta:
         model  = VideoComment
         fields = ['id', 'video', 'parent', 'body']
@@ -105,8 +125,7 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
     def validate_parent(self, value):
         if value and value.parent_id is not None:
             raise serializers.ValidationError(
-                "Replies to replies are not supported. "
-                "Tag the user with @mention instead."
+                "Replies to replies are not supported. Use @mention instead."
             )
         return value
 
@@ -114,17 +133,12 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        # FIX-E: CommentDetailView.patch passes is_edited=True as a kwarg
-        # into serializer.save() — pop it here so it doesn't get passed to
-        # the parent's update() as an unexpected keyword argument.
         is_edited = validated_data.pop('is_edited', None)
-        instance  = super().update(instance, validated_data)
+        instance = super().update(instance, validated_data)
         if is_edited is not None:
             instance.is_edited = is_edited
             instance.save(update_fields=['is_edited'])
         return instance
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SHORT VIDEO — READ
 # ─────────────────────────────────────────────────────────────────────────────
