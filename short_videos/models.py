@@ -21,7 +21,7 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.core.storages import storages # Fixed dynamic globals environment evaluation error
+from django.core.files.storage import default_storage
 from leagues.models import League, Team
 
 
