@@ -53,9 +53,9 @@ def _author_dict(user, request):
             'account_type': 'fan',
         }
 
-    profile     = getattr(user, 'profile', None)
+    profile = getattr(user, 'user_profile', None)
     if not profile:
-        profile = getattr(user, 'userprofile', None) or getattr(author, 'user_profile', None)
+        profile = getattr(user, 'userprofile', None) or getattr(user, 'user_profile', None)
         
     profile_pic = _build_url(request, getattr(profile, 'avatar', getattr(profile, 'profile_image', None)))
 
@@ -145,17 +145,14 @@ class VideoCommentSerializer(SupportLogicMixin, serializers.Serializer):
     """
     id              = serializers.UUIDField(read_only=True)
     video_id        = serializers.UUIDField(read_only=True)
-    body            = serializers.CharField(read_only=True)
-    content         = serializers.SerializerMethodField()
+    content = serializers.CharField(read_only=True)
     author_details  = serializers.SerializerMethodField()
     supporting_info = serializers.SerializerMethodField()
     reply_count     = serializers.SerializerMethodField()
     created_at      = serializers.DateTimeField(read_only=True)
     is_edited       = serializers.BooleanField(read_only=True)
 
-    @extend_schema_field(OpenApiTypes.STR)
-    def get_content(self, obj):
-        return obj.body if obj.body else ""
+
 
     @extend_schema_field(OpenApiTypes.INT)
     def get_reply_count(self, obj):
@@ -168,37 +165,41 @@ class VideoCommentSerializer(SupportLogicMixin, serializers.Serializer):
 
 
 class VideoCommentCreateSerializer(serializers.ModelSerializer):
-    content = serializers.CharField(required=False, write_only=True)
 
     class Meta:
-        model  = VideoComment
-        fields = ['id', 'parent', 'body', 'content']
+        model = VideoComment
+        fields = ['id', 'parent', 'content']
         read_only_fields = ['id']
+
         extra_kwargs = {
-            'body':   {'required': False},
-            'parent': {'required': False, 'allow_null': True},
+            'parent': {
+                'required': False,
+                'allow_null': True,
+            },
+            'content': {
+                'required': True,
+            }
         }
 
-    def validate(self, attrs):
-        if 'content' in attrs and not attrs.get('body'):
-            attrs['body'] = attrs.pop('content')
-        else:
-            attrs.pop('content', None)
+    def validate_content(self, value):
+        value = (value or '').strip()
 
-        body = attrs.get('body', '') or ''
-        if not body.strip():
-            raise serializers.ValidationError({'content': 'Comment cannot be empty.'})
-        if len(body) > 1000:
-            raise serializers.ValidationError({'content': 'Comment is too long (max 1000 characters).'})
-        attrs['body'] = body.strip()
-        return attrs
+        if not value:
+            raise serializers.ValidationError("Comment cannot be empty.")
+
+        if len(value) > 1000:
+            raise serializers.ValidationError(
+                "Comment is too long (max 1000 characters)."
+            )
+
+        return value
 
     def validate_parent(self, value):
         if value and value.parent_id is not None:
-            raise serializers.ValidationError("Nested sub-replies are disabled. Use standard tags.")
+            raise serializers.ValidationError(
+                "Nested sub-replies are disabled."
+            )
         return value
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SHORT VIDEO — READ
 # ─────────────────────────────────────────────────────────────────────────────
