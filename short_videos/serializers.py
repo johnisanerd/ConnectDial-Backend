@@ -4,8 +4,10 @@ ConnectDial — Serializers
 
 Fixes applied
 ─────────────
-  FIX-1  Added ShortVideoCreateSerializer — a dedicated write serializer for
+  FIX-1  ShortVideoCreateSerializer — dedicated write serializer for
          ShortVideoUploadView.
+  FIX-E  VideoCommentCreateSerializer.update() accepts is_edited kwarg
+         passed by CommentDetailView.patch().
 """
 
 import re
@@ -109,9 +111,18 @@ class VideoCommentCreateSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        comment = super().create(validated_data)
-        # Mark as edited will be handled in signals for updates
-        return comment
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        # FIX-E: CommentDetailView.patch passes is_edited=True as a kwarg
+        # into serializer.save() — pop it here so it doesn't get passed to
+        # the parent's update() as an unexpected keyword argument.
+        is_edited = validated_data.pop('is_edited', None)
+        instance  = super().update(instance, validated_data)
+        if is_edited is not None:
+            instance.is_edited = is_edited
+            instance.save(update_fields=['is_edited'])
+        return instance
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,8 +192,14 @@ class ShortVideoSerializer(serializers.ModelSerializer):
         return None
 
     def get_video_url(self, obj):
+        """
+        Returns the streaming URL: /api/videos/shorts/<pk>/stream/?token=<tok>
+        The token is appended so react-native-video can authenticate the range
+        request without sending Authorization headers (not supported by all
+        video players).
+        """
         request = self.context.get('request')
-        path = f"/api/videos/shorts/{obj.pk}/stream/"
+        path    = f"/api/videos/shorts/{obj.pk}/stream/"
 
         token = None
         if request and request.auth:
@@ -203,12 +220,11 @@ class ShortVideoSerializer(serializers.ModelSerializer):
         return None
 
     def get_share_url(self, obj):
-        return obj.share_url
+        return obj.share_url  # https://connectdial.com/shorts/<pk>/
 
     def get_is_liked(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
-            # Relies on prefetch_related('likes') from feed
             return obj.likes.filter(user=request.user).exists()
         return False
 
@@ -233,8 +249,10 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
     """
     Write serializer for ShortVideoUploadView.
 
-    FIX-1: video field is writable so compressed file goes through proper validation.
-    FIX-3: also accept 'file' as the upload field name (what the React Native frontend sends).
+    FIX-1: video field is writable so the compressed file goes through proper
+           validation.
+    FIX-3: also accept 'file' as the upload field name (what the RN frontend
+           sends via FormData).
     """
     video = serializers.FileField(required=False)
     # Accept 'file' as an alias — the RN frontend appends the video as 'file'
@@ -258,26 +276,21 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
 
         content_type = getattr(value, 'content_type', '') or ''
 
-        # 1. Must be a video
         if content_type and not content_type.startswith('video/'):
             raise serializers.ValidationError(
                 f"Uploaded file must be a video. Received: {content_type}"
             )
 
-        # 2. Enforce 2GB maximum size
-        max_size_bytes = 2 * 1024 * 1024 * 1024  # 2GB
+        max_size_bytes = 2 * 1024 * 1024 * 1024  # 2 GB
         if value.size > max_size_bytes:
             size_gb = value.size / (1024 * 1024 * 1024)
             raise serializers.ValidationError(
                 f"Video file is too large ({size_gb:.2f} GB). Maximum allowed size is 2 GB."
             )
 
-        # 3. Optional: Soft warning for large files (can be logged)
-        if value.size > 500 * 1024 * 1024:   # > 500MB
-            # You can add logging here if desired
-            pass
-
         return value
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ENGAGEMENT
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,5 +329,7 @@ class VideoViewSerializer(serializers.ModelSerializer):
         if value < 0:
             raise serializers.ValidationError("watch_time cannot be negative.")
         if value > 7200:
-            raise serializers.ValidationError("watch_time cannot exceed 7200 seconds (2 hrs).")
+            raise serializers.ValidationError(
+                "watch_time cannot exceed 7200 seconds (2 hrs)."
+            )
         return value
