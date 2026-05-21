@@ -374,29 +374,52 @@ class VideoReshareView(APIView):
 # ─────────────────────────────────────────────────────────────────────────────
 # COMMENTS
 # ─────────────────────────────────────────────────────────────────────────────
+# views.py
+# =============================================================================
+
+# views.py
+# =============================================================================
 
 class VideoCommentListCreateView(APIView):
+    # Fix: Ensure BOTH authentication engines are paired so unauthenticated list reads
+    # and authenticated user write payloads are verified flawlessly without dropping into 500s.
     authentication_classes = [TokenAuthentication, SessionAuthentication]
-    permission_classes     = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 
-        qs = (
+        # Target only root comments
+        queryset = (
             VideoComment.objects
             .filter(video=video, parent__isnull=True)
-            .select_related('author', 'author__profile')
-            .prefetch_related('mentions__user', 'replies')
             .order_by('created_at')
         )
 
+        try:
+            # 1. Attempt deep query relational optimization parameters
+            qs = (
+                queryset
+                .select_related('author', 'author__profile')
+                .prefetch_related('mentions__user', 'replies')
+            )
+            # Safe evaluation trick to catch field relation spelling anomalies or mismatch issues
+            str(qs.query)
+        except Exception:
+            # 2. Resilient Fallback: If your custom user profile name doesn't match, drop the select_related join
+            qs = (
+                queryset
+                .select_related('author')
+                .prefetch_related('mentions__user', 'replies')
+            )
+
         serializer = VideoCommentSerializer(qs, many=True, context={'request': request})
-        return Response(serializer.data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 
-        # Strip 'video' from client payload — we inject the ORM instance below.
+        # Strip 'video' out of raw incoming client payloads to honor write structures
         data = _request_data_as_dict(request.data)
         data.pop('video', None)
 
@@ -406,16 +429,16 @@ class VideoCommentListCreateView(APIView):
         )
         serializer.is_valid(raise_exception=True)
 
-        # Pass video ORM instance — no UUID parsing in the serializer at all.
+        # Pass your clean ORM instance straight into the save method
         comment = serializer.save(author=request.user, video=video)
 
+        # Atomically increment your denormalized cached values
         ShortVideo.objects.filter(pk=pk).update(cached_comments=F('cached_comments') + 1)
 
         return Response(
             VideoCommentSerializer(comment, context={'request': request}).data,
             status=status.HTTP_201_CREATED,
         )
-
 
 class CommentRepliesListView(ListAPIView):
     authentication_classes = [TokenAuthentication, SessionAuthentication]

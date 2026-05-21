@@ -54,16 +54,18 @@ class CommentMentionSerializer(serializers.ModelSerializer):
 # COMMENTS — READ
 # ─────────────────────────────────────────────────────────────────────────────
 
+# serializers.py
+# =============================================================================
+
 class VideoCommentSerializer(serializers.ModelSerializer):
     """
     Read serializer returned to the frontend after GET or POST.
-    Exposes both 'body' (model field) and 'content' (alias) so the RN
-    frontend's `c.content ?? c.body` pattern always finds a value.
+    Exposes both 'body' and 'content' safely without causing duplicate attribute compilation bugs.
     """
     author_details = serializers.SerializerMethodField()
     mentions       = CommentMentionSerializer(many=True, read_only=True)
     reply_count    = serializers.SerializerMethodField()
-    content        = serializers.CharField(source='body', read_only=True)
+    content        = serializers.SerializerMethodField() # Changed to a safe Method Field
 
     class Meta:
         model  = VideoComment
@@ -72,7 +74,7 @@ class VideoCommentSerializer(serializers.ModelSerializer):
             'video',
             'author_details',
             'body',
-            'content',      # alias for body — what the RN frontend reads
+            'content',      # Safe alias target for React Native frontend
             'mentions',
             'reply_count',
             'created_at',
@@ -80,31 +82,53 @@ class VideoCommentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'is_edited']
 
+    def get_content(self, obj):
+        # Gracefully handle the db_column='text' field extraction proxy
+        return obj.body if obj.body else ""
+
+# serializers.py
+# =============================================================================
+
     def get_author_details(self, obj):
         request = self.context.get('request')
-        profile = getattr(obj.author, 'profile', None)
-
+        author = obj.author
+        
         avatar_url = None
-        try:
-            if profile and profile.avatar:
-                avatar_url = (
-                    request.build_absolute_uri(profile.avatar.url)
-                    if request else profile.avatar.url
-                )
-        except Exception:
-            pass
+        
+        # Check if the author object is empty or anonymous to prevent attribute failures
+        if not author or author.is_anonymous:
+            return {
+                'id': None,
+                'username': 'anonymous',
+                'display_name': 'Anonymous User',
+                'profile_pic': None,
+            }
+
+        display_name = author.username
+        profile = getattr(author, 'profile', None)
+        if not profile:
+            profile = getattr(author, 'userprofile', None) or getattr(author, 'user_profile', None)
+
+        if profile:
+            display_name = getattr(profile, 'display_name', author.username)
+            try:
+                if getattr(profile, 'avatar', None):
+                    avatar_url = (
+                        request.build_absolute_uri(profile.avatar.url)
+                        if request else profile.avatar.url
+                    )
+            except Exception:
+                pass
 
         return {
-            'id':           obj.author.id,
-            'username':     obj.author.username,
-            'display_name': getattr(profile, 'display_name', obj.author.username),
+            'id':           author.id,
+            'username':     author.username,
+            'display_name': display_name,
             'profile_pic':  avatar_url,
         }
 
     def get_reply_count(self, obj):
         return obj.replies.count() if hasattr(obj, 'replies') else 0
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # COMMENTS — WRITE
 # ─────────────────────────────────────────────────────────────────────────────
