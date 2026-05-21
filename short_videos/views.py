@@ -78,6 +78,21 @@ User = get_user_model()
 # UPLOAD
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _flatten_request_data(request_data, **extra):
+    """
+    Safely merge request.data (which may be a QueryDict with list values)
+    into a plain dict, then merge in any extra kwargs.
+    QueryDict.dict() returns the last value for each key, which is correct
+    for single-value fields like 'content', 'watch_time', 'platform'.
+    """
+    if hasattr(request_data, 'dict'):
+        data = request_data.dict()
+    else:
+        data = dict(request_data)
+    data.update(extra)
+    return data
+
 class ShortVideoUploadView(generics.CreateAPIView):
     serializer_class   = ShortVideoCreateSerializer
     permission_classes = [IsAuthenticated]
@@ -256,7 +271,7 @@ class VideoViewRecordView(APIView):
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
         serializer = VideoViewSerializer(
-            data={**request.data, 'video': str(video.pk)}
+            data=_flatten_request_data(request.data, video=str(video.pk))
         )
         serializer.is_valid(raise_exception=True)
         serializer.save(user=request.user)
@@ -273,7 +288,7 @@ class VideoShareRecordView(APIView):
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
         serializer = VideoShareSerializer(
-            data={**request.data, 'video': str(video.pk)}
+            data=_flatten_request_data(request.data, video=str(video.pk))
         )
         serializer.is_valid(raise_exception=True)
         share = serializer.save(user=request.user)
@@ -358,8 +373,10 @@ class VideoCommentListCreateView(APIView):
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 
+        data = _flatten_request_data(request.data, video=str(video.pk))
+
         serializer = VideoCommentCreateSerializer(
-            data={**request.data, 'video': video.pk},
+            data=data,
             context={'request': request}
         )
         serializer.is_valid(raise_exception=True)
