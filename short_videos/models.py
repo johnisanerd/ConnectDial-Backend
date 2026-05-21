@@ -178,7 +178,7 @@ class VideoComment(models.Model):
         on_delete=models.CASCADE, 
         related_name='replies'
     )
-    body = models.TextField(max_length=1000, db_column='text')
+    body = models.TextField(max_length=1000)
     
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     is_edited  = models.BooleanField(default=False)
@@ -189,8 +189,9 @@ class VideoComment(models.Model):
             models.Index(fields=['video', 'parent', 'created_at']),
         ]
 
+# ✅ FIX: Update __str__ to access the correct model attributes securely
     def __str__(self):
-        return f"Comment({self.id}) by {self.author_id} on Video({self.video_id})"
+        return f"Comment {self.id} by User {self.author_id} on Video {self.video.id if self.video else 'Unknown'}"
 
 
 class CommentMention(models.Model):
