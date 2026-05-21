@@ -81,9 +81,9 @@ def like_deleted(sender, instance, **kwargs):
 _MENTION_RE = re.compile(r'@([\w.]+)')
 
 
-def _resolve_mentions(body: str):
+def _resolve_mentions(content: str):
     User = _get_user_model()
-    handles = set(_MENTION_RE.findall(body))
+    handles = set(_MENTION_RE.findall(content))
     if not handles:
         return []
     return list(User.objects.filter(username__in=handles))
@@ -106,7 +106,7 @@ def comment_saved(sender, instance, created, **kwargs):
     if created:
         _update_cached(instance.video_id, 'cached_comments', 1)
 
-    mentioned = _resolve_mentions(instance.body)
+    mentioned = _resolve_mentions(instance.content)
 
     if mentioned:
         if not created:
