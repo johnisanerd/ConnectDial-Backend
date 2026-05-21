@@ -178,8 +178,7 @@ class VideoComment(models.Model):
         on_delete=models.CASCADE, 
         related_name='replies'
     )
-    body = models.TextField(max_length=1000)
-    
+    content = models.TextField(max_length=1000)   # or keep db_column='text' if you want    
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     is_edited  = models.BooleanField(default=False)
 
