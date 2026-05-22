@@ -32,4 +32,4 @@ jobs:
           
           # Execute remaining background database changes cleanly
           docker-compose exec -T web python manage.py migrate
-          docker-compose exec -T web python manage.py collectstatic --noinput
+          
