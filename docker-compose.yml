@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: connectdial_web
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    ports:
+      - "127.0.0.1:8000:8000"  # Hidden from the public; only accessible by your host Nginx
+    command: gunicorn connectdial.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 600
+    depends_on:
+      - redis
+
+  celery_worker:
+    build: .
+    container_name: connectdial_worker
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    command: celery -A connectdial worker --loglevel=info
+    depends_on:
+      - redis
+
+  celery_beat:
+    build: .
+    container_name: connectdial_beat
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    command: celery -A connectdial beat --loglevel=info
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    container_name: connectdial_redis
+    restart: always
+    ports:
+      - "127.0.0.1:6379:6379"  # Protected; locked down to localhost

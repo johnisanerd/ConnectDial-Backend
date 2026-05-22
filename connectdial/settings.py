@@ -306,8 +306,9 @@ DEFAULT_FROM_EMAIL  = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@connectdial.
 # ======================
 # CELERY
 # ======================
-CELERY_BROKER_URL     = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+# Change from: 'redis://localhost:6379/0'
+CELERY_BROKER_URL     = os.environ.get('CELERY_BROKER', 'redis://redis:6379/0')
+CELERY_RESULT_BACKEND = os.environ.get('CELERY_BROKER', 'redis://redis:6379/0')
 CELERY_TIMEZONE       = 'UTC'
 
 CELERY_BEAT_SCHEDULE = {
@@ -473,15 +474,13 @@ APP_NAME = 'ConnectDial'
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": "redis://127.0.0.1:6379/1",   # DB 1 — separate from Celery's DB 0
+        # Change from: "redis://127.0.0.1:6379/1"
+        "LOCATION": "redis://redis:6379/1",
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
-            # Fail fast if Redis is down rather than hanging every request
             "SOCKET_CONNECT_TIMEOUT": 5,
             "SOCKET_TIMEOUT": 5,
         },
-        # Namespace all keys — easy to identify/flush without
-        # touching Celery's keyspace in DB 0
         "KEY_PREFIX": "connectdial",
     }
 }
