@@ -313,7 +313,7 @@ def _token_response(user, extra=None):
 
 
 def send_welcome_email(user):
-    """Send welcome email only once per user."""
+    """Send welcome email only once per user. Never raises — email is non-critical."""
     if not user or not user.email:
         logger.warning("Cannot send welcome email - user or email missing")
         return
@@ -325,31 +325,37 @@ def send_welcome_email(user):
         return
 
     try:
-        context      = {'user': user}
-        html_message = render_to_string('emails/welcome_onboarding.html', context)
+        context = {'user': user}
+
+        try:
+            html_message = render_to_string('emails/welcome_onboarding.html', context)
+        except Exception as tmpl_err:
+            logger.warning(f"Welcome email template error: {tmpl_err} — sending plain text only")
+            html_message = None
+
         plain_message = (
             f"Hi {user.username or user.email},\n\n"
             f"Welcome to ConnectDial! 🎉\n\n"
             f"Please complete your profile to get the best experience.\n\n"
             f"Best regards,\nThe ConnectDial Team"
         )
+
         send_mail(
             subject='Welcome to ConnectDial! Complete Your Profile',
             message=plain_message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[user.email],
             html_message=html_message,
-            fail_silently=False,
+            fail_silently=True,   # email failure must never kill registration
         )
+
         profile.welcome_email_sent = True
         profile.save(update_fields=['welcome_email_sent'])
-        logger.info(f"Welcome email sent successfully to {user.email}")
+        logger.info(f"Welcome email sent to {user.email}")
 
     except Exception:
-        logger.error(f"Failed to send welcome email to {user.email}")
-        logger.error(traceback.format_exc())
-
-
+        logger.error(f"send_welcome_email failed for {user.email}:\n{traceback.format_exc()}")
+        # Intentionally swallowed — email is non-critical
 # ─────────────────────────────────────────────
 # EMAIL VERIFICATION
 # ─────────────────────────────────────────────
@@ -1154,19 +1160,19 @@ class RegisterView(generics.CreateAPIView):
         response = super().create(request, *args, **kwargs)
 
         if response.status_code == 201:
-            user = User.objects.get(id=response.data['id'])
-
-            token, _ = Token.objects.get_or_create(user=user)
-            response.data['token'] = token.key
+            try:
+                user = User.objects.get(id=response.data['id'])
+                token, _ = Token.objects.get_or_create(user=user)
+                response.data['token'] = token.key
+            except Exception:
+                logger.error(f"RegisterView token error:\n{traceback.format_exc()}")
 
             try:
                 send_welcome_email(user)
-            except Exception as e:
-                logger.error(f"Welcome email failed: {str(e)}")
+            except Exception:
+                logger.error(f"RegisterView welcome email error:\n{traceback.format_exc()}")
 
         return response
-
-
 @extend_schema(
     summary="User Onboarding",
     description="Set account type and fan preferences for the authenticated user.",
