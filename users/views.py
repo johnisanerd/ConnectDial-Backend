@@ -1130,18 +1130,23 @@ class ToggleFollowView(APIView):
 # ─────────────────────────────────────────────
 
 class RegisterView(generics.CreateAPIView):
-    queryset           = User.objects.all()
-    serializer_class   = UserSerializer
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
     permission_classes = [AllowAny]
 
     def create(self, request, *args, **kwargs):
         response = super().create(request, *args, **kwargs)
 
         if response.status_code == 201:
-            user     = User.objects.get(id=response.data['id'])
+            user = User.objects.get(id=response.data['id'])
+
             token, _ = Token.objects.get_or_create(user=user)
             response.data['token'] = token.key
-            send_welcome_email(user)
+
+            try:
+                send_welcome_email(user)
+            except Exception as e:
+                logger.error(f"Welcome email failed: {str(e)}")
 
         return response
 
