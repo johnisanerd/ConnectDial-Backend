@@ -19,7 +19,14 @@ def _is_external_url(url: str) -> bool:
 
 
 def stream_video_response(request, video_instance):
-    video_file = video_instance.video
+    """
+    Defensively inspects parameters to unpack either the ShortVideo container model
+    or standard FieldFile fields cleanly without breaking native player range lookups.
+    """
+    if hasattr(video_instance, 'video'):
+        video_file = video_instance.video
+    else:
+        video_file = video_instance
 
     if not video_file or not video_file.name:
         from rest_framework.response import Response

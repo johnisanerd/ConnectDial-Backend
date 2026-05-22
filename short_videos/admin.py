@@ -1,82 +1,156 @@
-import io
-import os
-import tempfile
+# short_videos/admin.py
+
 from django.contrib import admin
-from django.core.files.base import ContentFile, File
-from django.core.files.uploadedfile import InMemoryUploadedFile
+from .models import (
+    ShortVideo,
+    VideoLike,
+    VideoComment,
+    CommentMention,
+    VideoShare,
+    VideoView,
+)
 
-from .models import ShortVideo, VideoLike, VideoComment, CommentMention, VideoShare, VideoView
-from .video_processing import compress_video, extract_duration, generate_thumbnail
 
-
+@admin.register(ShortVideo)
 class ShortVideoAdmin(admin.ModelAdmin):
-    list_display = ('id', 'author', 'caption', 'duration', 'created_at', 'status')
-    ordering = ['-created_at']
-    readonly_fields = ('duration', 'cached_likes', 'cached_comments', 
-                      'cached_shares', 'cached_views')
+    list_display = (
+        'id',
+        'author',
+        'league',
+        'team',
+        'status',
+        'duration',
+        'cached_likes',
+        'cached_comments',
+        'cached_views',
+        'created_at',
+    )
 
-    def save_model(self, request, obj, form, change):
-        """
-        Handle video compression + metadata extraction when uploading 
-        or replacing video via Django Admin.
-        """
-        video_file = form.cleaned_data.get('video')
+    list_filter = (
+        'status',
+        'league',
+        'team',
+        'created_at',
+    )
 
-        if video_file and 'video' in form.changed_data:
-            tmp_path = None
-            compressed_path = None
+    search_fields = (
+        'caption',
+        'author__username',
+    )
 
-            try:
-                # 1. Save uploaded file to temp disk
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
-                    for chunk in video_file.chunks():
-                        tmp.write(chunk)
-                    tmp_path = tmp.name
+    readonly_fields = (
+        'id',
+        'cached_likes',
+        'cached_comments',
+        'cached_shares',
+        'cached_views',
+        'cached_avg_watch_ratio',
+        'created_at',
+        'updated_at',
+    )
 
-                # 2. Compress video
-                compressed_path = tmp_path + '_compressed.mp4'
-                compress_video(tmp_path, compressed_path)
-
-                # 3. Extract duration
-                obj.duration = extract_duration(compressed_path)
-
-                # 4. IMPORTANT: Use Django's File() instead of InMemoryUploadedFile for GCS
-                with open(compressed_path, 'rb') as f:
-                    django_file = File(f, name=video_file.name or 'video.mp4')
-                    obj.video = django_file   # ← Better for GoogleCloudStorage
-
-                # 5. Generate thumbnail if missing
-                if not obj.thumbnail:
-                    try:
-                        thumb_bytes = generate_thumbnail(compressed_path)
-                        obj.thumbnail.save(
-                            f'thumb_{obj.pk or "new"}.jpg',
-                            ContentFile(thumb_bytes),
-                            save=False
-                        )
-                    except Exception as e:
-                        print(f"Thumbnail generation failed: {e}")
-
-            except Exception as e:
-                print(f"Video processing failed in admin: {e}")
-                # Optionally re-raise or show message to admin user
-            finally:
-                # Cleanup temp files
-                for path in (tmp_path, compressed_path):
-                    if path and os.path.exists(path):
-                        try:
-                            os.unlink(path)
-                        except OSError:
-                            pass
-
-        # Final save
-        super().save_model(request, obj, form, change)
+    ordering = ('-created_at',)
 
 
-# Register models
-admin.site.register(ShortVideo, ShortVideoAdmin)
-admin.site.register(VideoLike)
-admin.site.register(VideoComment)
-admin.site.register(CommentMention)
-admin.site.register(VideoShare)
-admin.site.register(VideoView)
+@admin.register(VideoComment)
+class VideoCommentAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'author',
+        'video',
+        'short_content',
+        'parent',
+        'is_edited',
+        'created_at',
+    )
+
+    search_fields = (
+        'content',
+        'author__username',
+    )
+
+    list_filter = (
+        'is_edited',
+        'created_at',
+    )
+
+    readonly_fields = (
+        'id',
+        'created_at',
+    )
+
+    ordering = ('-created_at',)
+
+    def short_content(self, obj):
+        if not obj.content:
+            return ''
+        return obj.content[:50]
+    
+    short_content.short_description = 'Content'
+
+
+@admin.register(VideoLike)
+class VideoLikeAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'user',
+        'video',
+        'created_at',
+    )
+
+    search_fields = (
+        'user__username',
+    )
+
+    ordering = ('-created_at',)
+
+
+@admin.register(CommentMention)
+class CommentMentionAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'comment',
+        'user',
+        'created_at',
+    )
+
+    search_fields = (
+        'user__username',
+    )
+
+    ordering = ('-created_at',)
+
+
+@admin.register(VideoShare)
+class VideoShareAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'user',
+        'video',
+        'platform',
+        'created_at',
+    )
+
+    list_filter = (
+        'platform',
+    )
+
+    ordering = ('-created_at',)
+
+
+@admin.register(VideoView)
+class VideoViewAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'user',
+        'video',
+        'watch_time',
+        'completed',
+        'created_at',
+    )
+
+    list_filter = (
+        'completed',
+    )
+
+    ordering = ('-created_at',)

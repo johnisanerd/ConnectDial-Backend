@@ -149,23 +149,37 @@ def generate_otp(length=6):
 
 
 def send_otp_email(user, otp_code, subject, purpose_label):
-    """Send HTML OTP email."""
-    context = {'user': user, 'otp': otp_code}
-    html_message = render_to_string('emails/password_reset_otp.html', context)
-    plain_message = (
-        f"Hi {user.username or user.email},\n\n"
-        f"Your {purpose_label} code is: {otp_code}\n\n"
-        f"This code expires in 15 minutes."
-    )
-    send_mail(
-        subject=subject,
-        message=plain_message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[user.email],
-        html_message=html_message,
-        fail_silently=False,
-    )
+    try:
+        context = {'user': user, 'otp': otp_code}
 
+        html_message = render_to_string(
+            'emails/password_reset_otp.html',
+            context
+        )
+
+        plain_message = (
+            f"Hi {user.username or user.email},\n\n"
+            f"Your {purpose_label} code is: {otp_code}\n\n"
+            f"This code expires in 15 minutes."
+        )
+
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            html_message=html_message,
+            fail_silently=False,
+        )
+
+        print("OTP EMAIL SENT SUCCESSFULLY")
+
+    except Exception as e:
+        print("EMAIL SEND ERROR:")
+        print(str(e))
+        import traceback
+        print(traceback.format_exc())
+        raise
 
 OTP_PURPOSE_META = {
     'login':          {'label': 'one-time login',     'subject': 'Your Login OTP'},
@@ -573,9 +587,8 @@ class VerifyOTPView(APIView):
     tags=["Password"],
 )
 class ForgotPasswordView(APIView):
-    """POST /auth/password/forgot/"""
     permission_classes = [AllowAny]
-    throttle_classes   = [PasswordResetThrottle]
+    throttle_classes = [PasswordResetThrottle]
 
     def post(self, request):
         identifier = request.data.get("email", "").strip()
@@ -592,6 +605,7 @@ class ForgotPasswordView(APIView):
         )
 
         user = _get_user_by_identifier(identifier)
+
         if not user:
             return generic_response
 
@@ -599,25 +613,27 @@ class ForgotPasswordView(APIView):
             logger.error(f"User {user.username} has no email address")
             return generic_response
 
-        otp = generate_otp()
-        OTPCode.objects.filter(user=user, purpose="password_reset").delete()
-        OTPCode.objects.create(
-            user=user,
-            code=otp,
-            purpose="password_reset",
-            expires_at=timezone.now() + timedelta(minutes=15),
-        )
-
-        meta = _otp_meta("password_reset")
         try:
-            send_otp_email(user, otp, subject=meta['subject'], purpose_label=meta['label'])
+            # Comment out the try block to let it raise the real error
+            # try:
+            otp_obj = OTPCode.generate_for(user, 'password_reset')
+
+            send_otp_email(
+                user,
+                otp_obj.code,
+                subject='Password Reset OTP',
+                purpose_label='password reset'
+            )
             logger.info(f"Password reset OTP sent to {user.email}")
+            # except Exception:
+            #     logger.error(f"Failed to send password reset email to {user.email}")
+            #     logger.error(traceback.format_exc())
+
         except Exception:
             logger.error(f"Failed to send password reset email to {user.email}")
             logger.error(traceback.format_exc())
 
         return generic_response
-
 
 @extend_schema(
     summary="Reset Password",
@@ -1130,18 +1146,23 @@ class ToggleFollowView(APIView):
 # ─────────────────────────────────────────────
 
 class RegisterView(generics.CreateAPIView):
-    queryset           = User.objects.all()
-    serializer_class   = UserSerializer
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
     permission_classes = [AllowAny]
 
     def create(self, request, *args, **kwargs):
         response = super().create(request, *args, **kwargs)
 
         if response.status_code == 201:
-            user     = User.objects.get(id=response.data['id'])
+            user = User.objects.get(id=response.data['id'])
+
             token, _ = Token.objects.get_or_create(user=user)
             response.data['token'] = token.key
-            send_welcome_email(user)
+
+            try:
+                send_welcome_email(user)
+            except Exception as e:
+                logger.error(f"Welcome email failed: {str(e)}")
 
         return response
 
