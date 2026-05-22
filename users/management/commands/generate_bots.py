@@ -9,107 +9,165 @@ from leagues.models import League, Team
 
 User = get_user_model()
 
+# ─────────────────────────────────────────────
+#  IDENTITY POOLS  (richer, more realistic)
+# ─────────────────────────────────────────────
+KE_FIRST   = ["Kevin","Brian","Evans","Emmanuel","Collins","Victor","Jane","Mercy",
+               "Faith","Joy","Samuel","Grace","Denis","Esther","Patrick","Diana"]
+KE_ETHNIC  = ["Kipchoge","Moraa","Kamau","Njeri","Odhiambo","Makena","Kibet",
+               "Waweru","Otieno","Muthoni","Karanja","Achieng","Mutua","Njenga"]
+
+INT_FIRST  = ["Jordan","Marcus","Giannis","Luka","Zion","Kyrie","Lewis","Max",
+               "Paulo","Kylian","Vinicius","Pedri","Bellingham","Haaland","Saka"]
+INT_LAST   = ["West","Rivers","Miller","Stone","Hamilton","Verstappen","Bryant",
+               "Fernandez","Diaz","Kroos","Modric","Benzema","Salah","Kane"]
+
+# Saudi-specific names (SPL has huge fanbase)
+SA_FIRST   = ["Abdullah","Faisal","Omar","Khalid","Yousef","Ahmed","Tariq","Nasser"]
+SA_LAST    = ["Al-Ghamdi","Al-Otaibi","Al-Zahrani","Al-Qahtani","Al-Harbi","Al-Shehri"]
+
+NEWS_PREFIXES = ["Daily","Global","Sports","Fanatic","Inside","The","Rapid","Flash",
+                  "Elite","Premier","Ultra","Arena","Pitch","Bleacher"]
+NEWS_SUFFIXES = ["News","Updates","Report","Central","Hub","Network","Wire","Desk",
+                  "Pulse","Feed","Live","Zone","Insider"]
+ORG_TYPES     = ["Foundation","Academy","Agency","Group","Sports Club",
+                  "Association","Institute","Media","FC Supporters","Ultras"]
+
+# League → persona flavour map
+LEAGUE_PERSONA = {
+    "premier league": {"lang": "en", "style": "passionate English fan"},
+    "la liga":        {"lang": "es", "style": "tactical obsessive"},
+    "serie a":        {"lang": "it", "style": "tactical analyst"},
+    "bundesliga":     {"lang": "de", "style": "stats-driven supporter"},
+    "ligue 1":        {"lang": "fr", "style": "flair appreciator"},
+    "saudi pro league": {"lang": "ar_en", "style": "excited Gulf fan watching the stars"},
+    "nba":            {"lang": "en", "style": "data-driven hoops head"},
+    "champions league": {"lang": "en", "style": "pan-European football romantic"},
+    "mls":            {"lang": "en", "style": "growing soccer culture fan"},
+}
+
+
 class Command(BaseCommand):
-    help = 'Generates high-fidelity bots (Fans, News, and Organizations)'
+    help = 'Generates high-fidelity bots (Fans, News, Orgs) with league-aware personas'
 
     def add_arguments(self, parser):
         parser.add_argument('total', type=int, help='Number of bots to create')
 
+    def _pick_name(self, acc_type, fav_league, news_prefixes, news_suffixes, org_types, suffix):
+        league_lower = fav_league.name.lower()
+        if acc_type == 'fan':
+            # Saudi league → mix Saudi + International names
+            if "saudi" in league_lower:
+                pool_choice = random.random()
+                if pool_choice < 0.40:
+                    f, l = random.choice(SA_FIRST), random.choice(SA_LAST)
+                elif pool_choice < 0.70:
+                    f, l = random.choice(INT_FIRST), random.choice(INT_LAST)
+                else:
+                    f, l = random.choice(KE_FIRST), random.choice(KE_ETHNIC)
+            elif random.random() < 0.25:
+                f, l = random.choice(INT_FIRST), random.choice(INT_LAST)
+            else:
+                f, l = random.choice(KE_FIRST), random.choice(KE_ETHNIC)
+            display = f"{f} {l}"
+            username = f"{f.lower()}_{l.lower()}_{suffix}"
+            return display, username
+        elif acc_type == 'news':
+            display = f"{random.choice(news_prefixes)} {fav_league.name} {random.choice(news_suffixes)}"
+        else:
+            display = f"{fav_league.name} {random.choice(org_types)}"
+        username = display.replace(" ", "_").lower() + f"_{suffix}"
+        return display, username
+
+    def _build_bio(self, acc_type, fav_league, teams):
+        league_lower = fav_league.name.lower()
+        persona = LEAGUE_PERSONA.get(league_lower, {}).get("style", "sports fan")
+        fav_team = random.choice(teams).name if teams else fav_league.name
+
+        if acc_type == 'fan':
+            bios = [
+                f"Die-hard {fav_team} supporter. {persona.title()}. #ConnectDial",
+                f"Living and breathing {fav_league.name}. Follow for {fav_team} content 🔥",
+                f"If it's about {fav_team}, I'm all over it. {fav_league.name} forever.",
+                f"Matchday is the only day that matters. {fav_team} til I die ⚽",
+            ]
+        elif acc_type == 'news':
+            bios = [
+                f"Breaking {fav_league.name} news 24/7. Transfers, results & more.",
+                f"Your fastest source for {fav_league.name} updates. Verified ✅",
+                f"All the {fav_league.name} action — live scores, transfers, analysis.",
+            ]
+        else:
+            bios = [
+                f"Supporting the growth of {fav_league.name} worldwide. Official Account ✅",
+                f"Connecting {fav_league.name} fans globally. Join the community.",
+            ]
+        return random.choice(bios)
+
     def handle(self, *args, **options):
-        total = options['total']
-        
-        # --- IDENTITY POOLS ---
-        ke_first = ["Kevin", "Brian", "Evans", "Emmanuel", "Collins", "Victor", "Jane", "Mercy", "Faith", "Joy"]
-        ke_ethnic = ["Kipchoge", "Moraa", "Kamau", "Njeri", "Odhiambo", "Makena", "Kibet", "Waweru"]
-        
-        int_first = ["Jordan", "LeBron", "Giannis", "Luka", "Zion", "Kyrie", "Lewis", "Max"]
-        int_last = ["West", "Rivers", "Miller", "Stone", "Hamilton", "Verstappen", "Bryant"]
-
-        # News & Org Names
-        news_prefixes = ["Daily", "Global", "Sports", "Fanatic", "Inside", "The", "Rapid"]
-        news_suffixes = ["News", "Updates", "Report", "Central", "Hub", "Network"]
-        org_types = ["Foundation", "Academy", "Agency", "Group", "Sports Club"]
-
+        total   = options['total']
         leagues = list(League.objects.all())
         if not leagues:
             self.stdout.write(self.style.ERROR('❌ No leagues found.'))
             return
 
-        headers = {'User-Agent': 'Mozilla/5.0...'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
         for i in range(total):
-            # 1. DETERMINE ACCOUNT TYPE (Weighted)
-            # 90% Fan, 7% News, 3% Organization
-            rand_val = random.random()
-            if rand_val < 0.90:
-                acc_type = 'fan'
-                badge = 'none'
-            elif rand_val < 0.97:
-                acc_type = 'news'
-                badge = 'official'
-            else:
-                acc_type = 'organization'
-                badge = 'verified'
+            rand_val  = random.random()
+            acc_type  = 'fan' if rand_val < 0.88 else ('news' if rand_val < 0.96 else 'organization')
+            badge     = 'none' if acc_type == 'fan' else ('official' if acc_type == 'news' else 'verified')
 
-            # 2. GENERATE IDENTITY BASED ON TYPE
-            suffix = random.randint(1000, 9999)
+            suffix     = random.randint(1000, 9999)
             fav_league = random.choice(leagues)
-            
-            if acc_type == 'fan':
-                is_international = random.random() < 0.25
-                f_name = random.choice(int_first if is_international else ke_first)
-                l_name = random.choice(int_last if is_international else ke_ethnic)
-                display_name = f"{f_name} {l_name}"
-                username = f"{f_name.lower()}_{l_name.lower()}_{suffix}"
-                bio = f"Massive {fav_league.name} supporter. #ConnectDial"
-                search_term = "portrait,person"
-            
-            elif acc_type == 'news':
-                name_part = random.choice(news_prefixes)
-                display_name = f"{name_part} {fav_league.name} {random.choice(news_suffixes)}"
-                username = display_name.replace(" ", "_").lower() + f"_{suffix}"
-                bio = f"Official source for all things {fav_league.name}. Breaking news and updates."
-                search_term = "news,studio,microphone"
+            teams      = list(Team.objects.filter(league=fav_league))
+            fav_team   = random.choice(teams) if teams else None
 
-            else:  # Organization
-                display_name = f"{fav_league.name} {random.choice(org_types)}"
-                username = display_name.replace(" ", "_").lower() + f"_{suffix}"
-                bio = f"Supporting the growth of {fav_league.name} worldwide. Official Account."
-                search_term = "office,building,logo"
+            display_name, username = self._pick_name(
+                acc_type, fav_league, NEWS_PREFIXES, NEWS_SUFFIXES, ORG_TYPES, suffix)
+            bio = self._build_bio(acc_type, fav_league, teams)
 
-            # 3. DATABASE PERSISTENCE
+            search_map = {
+                'fan':          'portrait,person,sports fan',
+                'news':         'news,studio,microphone,journalism',
+                'organization': 'stadium,office,sports management',
+            }
+            search_term = search_map[acc_type]
+
             try:
                 user = User.objects.create(
                     username=username,
                     email=f"bot_{suffix}@connectdial.com",
                     favorite_league=fav_league,
-                    account_type=acc_type, # 🚀 Sets 'fan', 'news', or 'organization'
-                    fan_badge=badge        # 🚀 Sets 'official', 'verified', etc.
+                    favorite_team=fav_team,
+                    account_type=acc_type,
+                    fan_badge=badge,
                 )
                 user.set_password('connect_bot_2026')
                 user.save()
 
                 profile, _ = Profile.objects.get_or_create(user=user)
                 profile.display_name = display_name
-                profile.is_bot = True
-                profile.bio = bio
+                profile.is_bot       = True
+                profile.bio          = bio
                 profile.save()
 
-                # 4. VISUAL IDENTITY
-                self.stdout.write(f"  [{i+1}/{total}] Creating {acc_type}: {username}...")
-                
-                # Dynamic Profile Image based on search_term
+                self.stdout.write(f"  [{i+1}/{total}] {acc_type.upper()} → @{username} | {fav_league.name}")
+
+                # Profile image via Unsplash
                 try:
-                    face_url = f"https://source.unsplash.com/featured/400x400/?{search_term}&sig={random.randint(1, 999)}"
-                    face_res = requests.get(face_url, headers=headers, timeout=5)
-                    if face_res.status_code == 200:
-                        profile.profile_image.save(f"pfp_{user.id}.jpg", ContentFile(face_res.content), save=True)
-                except:
-                    pass
+                    img_url = (f"https://source.unsplash.com/featured/400x400/?"
+                               f"{search_term}&sig={random.randint(1, 9999)}")
+                    res = requests.get(img_url, headers=headers, timeout=6)
+                    if res.status_code == 200:
+                        profile.profile_image.save(f"pfp_{user.id}.jpg",
+                                                    ContentFile(res.content), save=True)
+                except Exception:
+                    pass  # Non-fatal — image is cosmetic
 
             except Exception as e:
-                self.stdout.write(self.style.ERROR(f"❌ Error: {e}"))
+                self.stdout.write(self.style.ERROR(f"  ❌ {username}: {e}"))
 
-            time.sleep(1) # HP 290 Safety
+            time.sleep(0.8)
 
-        self.stdout.write(self.style.SUCCESS(f'✅ Finished generating {total} mixed-type bots.'))
+        self.stdout.write(self.style.SUCCESS(f'✅ Done — {total} intelligent bots deployed.'))

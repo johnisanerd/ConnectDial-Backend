@@ -1,3 +1,14 @@
+"""
+bot_follow.py  —  Smart Social Graph Expansion
+────────────────────────────────────────────────
+Improvements:
+  • Prioritises team-level matches over league-level (feels personal)
+  • News/Org bots follow real users too (not just bots)
+  • Mutual follow probability: if target already follows the bot, bot follows back
+  • Caps total follows per bot per run (prevents spam)
+  • Rate-limit friendly: 0.1s sleep per follow (vs 0.2s per loop)
+"""
+
 import random
 import time
 from django.core.management.base import BaseCommand
@@ -6,55 +17,81 @@ from users.models import Follow
 
 User = get_user_model()
 
+MAX_FOLLOWS_PER_BOT = 5   # per run — keeps growth organic
+
+
 class Command(BaseCommand):
-    help = 'Makes bots follow users (real and bots) who share their sports interests'
+    help = 'Smart social graph expansion — bots follow based on shared team/league interests'
 
     def handle(self, *args, **options):
-        # 1. Get all active bots
         bots = User.objects.filter(profile__is_bot=True)
-        
         if not bots.exists():
             self.stdout.write(self.style.ERROR("No bots found. Run generate_bots first."))
             return
 
-        self.stdout.write(f"👥 Syncing the social graph for {bots.count()} bots...")
+        self.stdout.write(f"👥 Building social graph for {bots.count()} bots...")
+        total_new = 0
 
         for bot in bots:
-            # 2. TARGETING: Find users who share the same favorite_league or favorite_team
-            # We prioritize team-mates first, then league-mates
-            target_users = User.objects.filter(
-                favorite_league=bot.favorite_league
-            ).exclude(id=bot.id)
+            already_following = Follow.objects.filter(follower=bot).values_list('followed_id', flat=True)
+            followed_count    = 0
 
-            if not target_users.exists():
-                continue
+            # ── Priority 1: Same TEAM fans (strongest affinity) ──────────────
+            if bot.favorite_team:
+                team_mates = (User.objects
+                              .filter(favorite_team=bot.favorite_team)
+                              .exclude(id=bot.id)
+                              .exclude(id__in=already_following)
+                              .order_by('?')[:3])
+                for target in team_mates:
+                    if followed_count >= MAX_FOLLOWS_PER_BOT:
+                        break
+                    _, created = Follow.objects.get_or_create(follower=bot, followed=target)
+                    if created:
+                        self.stdout.write(
+                            f"  ⚽ @{bot.username} → @{target.username} "
+                            f"[same team: {bot.favorite_team.name}]")
+                        followed_count += 1
+                        total_new      += 1
+                        time.sleep(0.1)
 
-            # 3. Pick 1-3 random users to follow
-            num_to_follow = random.randint(1, 3)
-            to_follow_list = target_users.order_by('?')[:num_to_follow]
+            # ── Priority 2: Mutual follow back ──────────────────────────────
+            # If someone (real user or bot) follows this bot, follow back
+            followers_not_followed = (User.objects
+                                      .filter(following__followed=bot)
+                                      .exclude(id=bot.id)
+                                      .exclude(id__in=already_following)
+                                      .order_by('?')[:2])
+            for target in followers_not_followed:
+                if followed_count >= MAX_FOLLOWS_PER_BOT:
+                    break
+                if random.random() < 0.70:   # 70% chance to follow back
+                    _, created = Follow.objects.get_or_create(follower=bot, followed=target)
+                    if created:
+                        self.stdout.write(
+                            f"  🔁 @{bot.username} → @{target.username} [mutual follow-back]")
+                        followed_count += 1
+                        total_new      += 1
+                        time.sleep(0.1)
 
-            for target in to_follow_list:
-                # 4. Use your Follow model's logic
-                # We use get_or_create to satisfy your 'unique_together' constraint
-                follow_obj, created = Follow.objects.get_or_create(
-                    follower=bot,
-                    followed=target
-                )
+            # ── Priority 3: Same LEAGUE fans (broad interest) ────────────────
+            if followed_count < MAX_FOLLOWS_PER_BOT and bot.favorite_league:
+                league_mates = (User.objects
+                                .filter(favorite_league=bot.favorite_league)
+                                .exclude(id=bot.id)
+                                .exclude(id__in=already_following)
+                                .order_by('?')[:(MAX_FOLLOWS_PER_BOT - followed_count)])
+                for target in league_mates:
+                    if followed_count >= MAX_FOLLOWS_PER_BOT:
+                        break
+                    _, created = Follow.objects.get_or_create(follower=bot, followed=target)
+                    if created:
+                        self.stdout.write(
+                            f"  🌍 @{bot.username} → @{target.username} "
+                            f"[same league: {bot.favorite_league.name}]")
+                        followed_count += 1
+                        total_new      += 1
+                        time.sleep(0.1)
 
-                if created:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"  ✨ {bot.username} (Fan of {bot.favorite_league.name}) "
-                            f"is now following {target.username}"
-                        )
-                    )
-                else:
-                    self.stdout.write(f"  - {bot.username} already follows {target.username}")
-
-            # Small delay to prevent database locking on your HP 290
-            time.sleep(0.2)
-
-        self.stdout.write(self.style.SUCCESS("✅ Social graph expansion complete!"))
-
-
-        
+        self.stdout.write(self.style.SUCCESS(
+            f"✅ Social graph expanded — {total_new} new follows added"))
