@@ -323,11 +323,12 @@ class ShortVideoSerializer(
 
         path = f"/api/videos/shorts/{obj.pk}/stream/"
 
-        token = (
-            request.auth.key
-            if request and request.auth
-            else None
-        )
+        token = None
+        if request and request.auth:
+            if hasattr(request.auth, 'key'):
+                token = request.auth.key
+            elif isinstance(request.auth, str):
+                token = request.auth
 
         if token:
             path = f"{path}?token={token}"

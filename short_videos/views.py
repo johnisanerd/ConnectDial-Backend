@@ -194,15 +194,20 @@ class ShortVideoPagination(LimitOffsetPagination):
 
 class ShortVideoFeedView(ListAPIView):
     authentication_classes = [TokenAuthentication, SessionAuthentication]
-    permission_classes     = [IsAuthenticated]
+    permission_classes     = [IsAuthenticatedOrReadOnly]
     serializer_class       = ShortVideoSerializer
     pagination_class       = ShortVideoPagination
 
     def get_queryset(self):
         """
-        Fetches short videos leveraging select_related for optimized author profiles
-        and prefetching fan preferences to support standard badge rendering logic.
+        Fetches personalized ranked feeds using your advanced ranking engine
+        when authenticated, falling back to a clean chronological list for guests.
         """
+        user = self.request.user
+        if user and user.is_authenticated:
+            from .feed_algorithm import get_short_video_feed
+            return get_short_video_feed(user)
+            
         return (
             ShortVideo.objects
             .filter(status='published')
@@ -227,7 +232,7 @@ class ShortVideoStreamView(APIView):
 
     def get(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
-        return stream_video_response(request, video.video)
+        return stream_video_response(request, video)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -363,7 +368,6 @@ class VideoCommentListCreateView(APIView):
     def get(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
         
-        # Uses single-join optimization directly to guarantee zero type crashes
         qs = (
             VideoComment.objects
             .filter(video=video, parent__isnull=True)
@@ -399,7 +403,6 @@ class CommentRepliesListView(ListAPIView):
     GET /api/videos/shorts/<pk>/comments/<comment_pk>/replies/ -> Optimized sub-threads
     """
     authentication_classes = [TokenAuthentication, SessionAuthentication]
-    # ✅ FIX: Explicitly add this line to override the global IsAuthenticated block
     permission_classes     = [IsAuthenticatedOrReadOnly] 
     serializer_class       = VideoCommentSerializer
 
