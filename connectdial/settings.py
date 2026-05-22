@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from datetime import timedelta
+import django
 from google.oauth2 import service_account
 from dotenv import load_dotenv
 from celery.schedules import crontab
@@ -295,7 +296,7 @@ SPECTACULAR_SETTINGS = {
 # ======================
 # EMAIL (Gmail SMTP)
 # ======================
-EMAIL_BACKEND       = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 EMAIL_HOST          = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT          = int(os.environ.get('EMAIL_PORT', 587))
 EMAIL_USE_TLS       = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'

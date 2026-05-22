@@ -614,6 +614,8 @@ class ForgotPasswordView(APIView):
             return generic_response
 
         try:
+            # Comment out the try block to let it raise the real error
+            # try:
             otp_obj = OTPCode.generate_for(user, 'password_reset')
 
             send_otp_email(
@@ -622,8 +624,10 @@ class ForgotPasswordView(APIView):
                 subject='Password Reset OTP',
                 purpose_label='password reset'
             )
-
             logger.info(f"Password reset OTP sent to {user.email}")
+            # except Exception:
+            #     logger.error(f"Failed to send password reset email to {user.email}")
+            #     logger.error(traceback.format_exc())
 
         except Exception:
             logger.error(f"Failed to send password reset email to {user.email}")
