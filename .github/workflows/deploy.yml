@@ -1,0 +1,35 @@
+name: Production Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main # Triggers whenever you push changes to main branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code repository
+      uses: actions/checkout@v4
+
+    - name: Deploy to AWS EC2 Instance via SSH Remote Commands
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}          # 16.16.98.131
+        username: ${{ secrets.EC2_USERNAME }}  # ubuntu
+        key: ${{ secrets.EC2_SSH_KEY }}        # Your AWS .pem private key file contents
+        port: 22
+        script: |
+          cd /home/ubuntu/ConnectDial-Backend
+          
+          # Pull latest commits
+          git pull origin main
+          
+          # Build images and restart containers gracefully
+          docker-compose down
+          docker-compose up --build -d
+          
+          # Execute remaining background database changes cleanly
+          docker-compose exec -T web python manage.py migrate
+          docker-compose exec -T web python manage.py collectstatic --noinput
