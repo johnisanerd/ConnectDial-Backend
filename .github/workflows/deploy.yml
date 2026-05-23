@@ -16,7 +16,7 @@ jobs:
     - name: Deploy to AWS EC2 Instance via SSH Remote Commands
       uses: appleboy/ssh-action@v1.0.3
       with:
-        host: ${{ secrets.EC2_HOST }}          # 16.16.171.51
+        host: ${{ secrets.EC2_HOST }}          # 16.16.126.225
         username: ${{ secrets.EC2_USERNAME }}  # ubuntu
         key: ${{ secrets.EC2_SSH_KEY }}        # Your AWS .pem private key file contents
         port: 22
