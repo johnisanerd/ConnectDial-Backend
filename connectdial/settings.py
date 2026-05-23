@@ -16,7 +16,7 @@ SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
 # ✅ FIX: ALLOWED_HOSTS takes plain hostnames only — no http:// or https:// prefix.
-# Your original had 'http://16.16.98.131' and 'https://16.16.98.131' which Django
+# Your original had 'http://16.16.171.51' and 'https://16.16.171.51' which Django
 # ignores / rejects, causing DisallowedHost errors in production.
 ALLOWED_HOSTS = [
     '192.168.100.107',
@@ -28,7 +28,7 @@ ALLOWED_HOSTS = [
     '10.199.198.201',
     '10.199.198.22',
     'api.connectdial.com',
-    '16.16.98.131',          # plain IP — no scheme
+    '16.16.171.51',          # plain IP — no scheme
 ]
 
 AUTH_USER_MODEL = 'users.User'
@@ -188,8 +188,8 @@ GS_BLOB_CHUNK_SIZE    = 1024 * 1024 * 16  # 16 MB chunks
 # CORS
 # ======================
 CORS_ALLOWED_ORIGINS = [
-    'http://16.16.98.131',
-    'https://16.16.98.131',
+    'http://16.16.171.51',
+    'https://16.16.171.51',
     'http://api.connectdial.com',
     'https://api.connectdial.com',
 ]
@@ -199,8 +199,8 @@ CORS_ALLOW_CREDENTIALS = True
 # CSRF
 # ======================
 CSRF_TRUSTED_ORIGINS = [
-    'http://16.16.98.131',
-    'https://16.16.98.131',
+    'http://16.16.171.51',
+    'https://16.16.171.51',
     'http://api.connectdial.com',
     'https://api.connectdial.com',
 ]
