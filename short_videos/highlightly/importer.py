@@ -45,7 +45,7 @@ class ImportResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIREBASE UPLOAD (Optimized: No slow programmatic ACL calls)
+# FIREBASE UPLOAD (Optimized: Direct Bucket Writes)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _upload_to_firebase(local_path: str, destination_blob: str) -> str:
@@ -58,7 +58,7 @@ def _upload_to_firebase(local_path: str, destination_blob: str) -> str:
     bucket = storage.bucket(bucket_name)
     blob = bucket.blob(destination_blob)
 
-    # Content type ensures browsers stream instead of downloading as an attachment
+    # Content type ensures mobile devices stream fluidly instead of triggering downloads
     blob.upload_from_filename(local_path, content_type="video/mp4")
     return blob.public_url
 
@@ -80,6 +80,8 @@ def _upload_thumbnail_to_firebase(local_path: str, destination_blob: str) -> str
 # ─────────────────────────────────────────────────────────────────────────────
 # DOWNLOAD HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
+
+_DOWNLOADABLE_SOURCES = ("streamable", "oddsjam", "scorebat", "dailymotion")
 
 HEADERS = {
     "User-Agent": (
@@ -199,10 +201,10 @@ def import_highlights(
     if not valid_highlights:
         return result
 
-    # Standard clean list approach rather than unescaped regex characters
+    # Fast SQL exact match lookup array construction
     expected_markers = [f"[highlightly:{h.get('id')}]" for h in valid_highlights]
 
-    # Fast bulk check to minimize execution lag
+    # Bulk query to eliminate N+1 latency blocks
     existing_captions = set(
         ShortVideo.objects.filter(
             caption__in=expected_markers
@@ -214,7 +216,7 @@ def import_highlights(
         highlight_id = h.get("id")
         marker = f"[highlightly:{highlight_id}]"
 
-        # Bulk duplicate validation lookup check
+        # Bulk duplicate lookup execution check
         if marker in existing_captions:
             result.skipped += 1
             continue
@@ -225,7 +227,7 @@ def import_highlights(
         tmp_video_path = None
         tmp_thumb_path = None
 
-        # ✅ Scope Sanitization: Variables are explicitly initialized every cycle
+        # ✅ Scope Sanitization: Variables are reset to blank strings every single loop
         firebase_video_url = ""
         firebase_thumb_url = ""
 
@@ -253,7 +255,7 @@ def import_highlights(
 
             # ── 2. Pipeline Stage B: Fast Database Persistence ─────────────────
             with transaction.atomic():
-                # Perform a defensive real-time duplicate check inside the atomic row transaction
+                # Real-time defensive check inside the transaction row isolation container
                 if ShortVideo.objects.filter(caption__startswith=marker).exists():
                     result.skipped += 1
                     continue
@@ -276,13 +278,14 @@ def import_highlights(
                     status="published",
                 )
 
-                # Assign direct path strings back to file fields
+                # ✅ Explicit Field Mapping: Assigning direct path strings back to file fields
                 if firebase_video_url:
                     instance.video = f"shorts/highlights/{highlight_id}.mp4"
 
                 if firebase_thumb_url:
                     instance.thumbnail = f"shorts/highlights/thumbs/{highlight_id}.jpg"
                 else:
+                    # Disk fallback routine if bucket stream was bypassed or dropped
                     if tmp_thumb_path:
                         with open(tmp_thumb_path, "rb") as f:
                             instance.thumbnail.save(
@@ -300,7 +303,7 @@ def import_highlights(
             result.errors.append({"highlight_id": highlight_id, "error": str(exc)})
 
         finally:
-            # Clean local temp file scrap pads
+            # Clean local temp scratch files completely
             for path in (tmp_video_path, tmp_thumb_path):
                 if path and os.path.exists(path):
                     try:
