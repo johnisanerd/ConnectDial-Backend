@@ -433,7 +433,9 @@ CELERY_BEAT_SCHEDULE = {
 GEMINI_API_KEY  = os.getenv('GEMINI_API_KEY')
 NEWS_API_KEY    = os.getenv('NEWS_API_KEY')
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
-
+# Correct:
+HIGHLIGHTLY_API_KEY = os.getenv("HIGHLIGHTLY_API_KEY")
+HIGHLIGHTLY_SPORT   = os.getenv("HIGHLIGHTLY_SPORT", default="football")
 # ======================
 # OTP SETTINGS
 # ======================
