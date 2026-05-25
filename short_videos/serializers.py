@@ -446,14 +446,14 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
     video = serializers.FileField(
         required=False,
         allow_null=True,
-        allow_empty_file=True
+        allow_empty_file=False
     )
 
     file = serializers.FileField(
         required=False,
         write_only=True,
         allow_null=True,
-        allow_empty_file=True
+        allow_empty_file=False
     )
 
     class Meta:
@@ -469,10 +469,17 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
 
+        # Preserve original compatibility logic
         if 'file' in attrs and not attrs.get('video'):
             attrs['video'] = attrs.pop('file')
         else:
             attrs.pop('file', None)
+
+        # NEW: ensure at least one upload exists
+        if not attrs.get('video'):
+            raise serializers.ValidationError({
+                'video': 'A video file is required.'
+            })
 
         return attrs
 
@@ -486,6 +493,7 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
             or ''
         )
 
+        # Preserve original validation
         if (
             content_type and
             not content_type.startswith('video/')
@@ -494,6 +502,7 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
                 f"Invalid video type: {content_type}"
             )
 
+        # 2 GB limit preserved
         max_size_bytes = 2 * 1024 * 1024 * 1024
 
         if value.size > max_size_bytes:
@@ -501,9 +510,13 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
                 "Video exceeds 2 GB limit."
             )
 
+        # NEW: prevent corrupted empty uploads
+        if value.size == 0:
+            raise serializers.ValidationError(
+                "Uploaded video is empty."
+            )
+
         return value
-
-
 # ─────────────────────────────────────────────────────────────
 # ENGAGEMENT
 # ─────────────────────────────────────────────────────────────
