@@ -240,23 +240,29 @@ def import_highlights(
         firebase_video_url = ""
 
         try:
-            # ── 1. External Network Pipeline (CRITICAL: Outside database transaction) ──
+            # ── 1. Pipeline Stage A: Run Network Calls OUTSIDE DB Transactions ──
             if _is_downloadable_url(video_url):
-                logger.info("Processing media [%s] from %s", highlight_id, video_url)
+                logger.info("Downloading highlight content [%s]...", highlight_id)
                 tmp_video_path = _download_video(video_url)
 
                 if tmp_video_path:
-                    firebase_blob = f"shorts/highlights/{highlight_id}.mp4"
+                    firebase_video_blob = f"shorts/highlights/{highlight_id}.mp4"
                     try:
-                        firebase_video_url = _upload_to_firebase(tmp_video_path, firebase_blob)
+                        firebase_video_url = _upload_to_firebase(tmp_video_path, firebase_video_blob)
                     except Exception as fb_exc:
-                        logger.warning("Firebase upload failed for %s: %s", highlight_id, fb_exc)
-                else:
-                    logger.warning("Download timed out or failed for highlight %s", highlight_id)
-            else:
-                logger.info("Skipping stream fetch for %s — unhandled host source: %s", highlight_id, source)
+                        logger.warning("Firebase video push dropped for %s: %s", highlight_id, fb_exc)
 
-            # ── 2. Short Database Writing Routine (Scoped & Isolated) ─────────────────
+            if fetch_thumbnails and h.get("imgUrl"):
+                tmp_thumb_path = _download_thumbnail(h.get("imgUrl"))
+                if tmp_thumb_path:
+                    firebase_thumb_blob = f"shorts/highlights/thumbs/{highlight_id}.jpg"
+                    try:
+                        # ✅ Fix: Assign the result to firebase_thumb_url so it resolves below
+                        firebase_thumb_url = _upload_thumbnail_to_firebase(tmp_thumb_path, firebase_thumb_blob)
+                    except Exception as fb_exc:
+                        logger.warning("Firebase thumbnail push dropped for %s: %s", highlight_id, fb_exc)
+
+            # ── 2. Pipeline Stage B: Fast Database Persistence ─────────────────
             with transaction.atomic():
                 match_data = h.get("match", {}) or {}
                 league = _resolve_league(match_data.get("league"))
@@ -275,35 +281,25 @@ def import_highlights(
                     team=team,
                     status="published",
                 )
-                instance.save()
 
-                # Process thumbnail adjustments within the transaction
-                thumb_url = h.get("imgUrl")
-                if fetch_thumbnails and thumb_url:
-                    tmp_thumb_path = _download_thumbnail(thumb_url)
+                # ✅ Explicit field mapping to direct bucket paths strings
+                if firebase_video_url:
+                    instance.video = f"shorts/highlights/{highlight_id}.mp4"
+
+                if firebase_thumb_url:
+                    instance.thumbnail = f"shorts/highlights/thumbs/{highlight_id}.jpg"
+                else:
                     if tmp_thumb_path:
-                        firebase_thumb_blob = f"shorts/highlights/thumbs/{highlight_id}.jpg"
-                        try:
-                            firebase_thumb_url = _upload_thumbnail_to_firebase(
-                                tmp_thumb_path, firebase_thumb_blob
+                        with open(tmp_thumb_path, "rb") as f:
+                            instance.thumbnail.save(
+                                f"highlightly_{highlight_id}.jpg",
+                                ContentFile(f.read()),
+                                save=False,
                             )
-                            instance.thumbnail.name = firebase_thumb_blob
-                            instance.save(update_fields=["thumbnail"])
-                        except Exception as thumb_exc:
-                            logger.warning("Firebase thumbnail upload failed: %s, using fallback", thumb_exc)
-                            try:
-                                with open(tmp_thumb_path, "rb") as f:
-                                    instance.thumbnail.save(
-                                        f"highlightly_{highlight_id}.jpg",
-                                        ContentFile(f.read()),
-                                        save=True,
-                                    )
-                            except Exception:
-                                pass
 
+                instance.save()
                 result.created += 1
                 logger.info("Successfully indexed highlight %s", highlight_id)
-
         except Exception as exc:
             logger.exception("Failed processing record row execution %s: %s", highlight_id, exc)
             result.errors.append({"highlight_id": highlight_id, "error": str(exc)})
