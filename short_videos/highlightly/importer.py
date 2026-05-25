@@ -50,21 +50,7 @@ class ImportResult:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _upload_to_firebase(local_path: str, destination_blob: str) -> str:
-    """
-    Upload a local file to Firebase Storage and return its public URL.
-
-    Uses the firebase_admin SDK which is already initialised by your
-    server startup (the '✅ Firebase Admin SDK initialized' message).
-
-    Parameters
-    ----------
-    local_path       : absolute path to the file on disk
-    destination_blob : path inside the bucket, e.g. 'shorts/highlights/xyz.mp4'
-
-    Returns
-    -------
-    Public HTTPS URL of the uploaded file.
-    """
+    """Upload a local file to Firebase Storage and return its public URL."""
     import firebase_admin
     from firebase_admin import storage
 
@@ -94,8 +80,6 @@ def _upload_thumbnail_to_firebase(local_path: str, destination_blob: str) -> str
 # DOWNLOAD HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# These are direct-downloadable video sources we know how to handle.
-# YouTube embed URLs cannot be downloaded directly — we skip those.
 _DOWNLOADABLE_SOURCES = ("streamable", "oddsjam", "scorebat", "dailymotion")
 
 HEADERS = {
@@ -111,17 +95,12 @@ def _is_downloadable_url(url: str) -> bool:
     """Return True if the URL points to a directly downloadable video."""
     if not url:
         return False
-    # Skip YouTube/embed-only sources
     skip = ("youtube.com", "youtu.be", "twitter.com", "x.com", "instagram.com")
     return not any(s in url for s in skip)
 
 
 def _download_video(url: str, timeout: int = 120) -> Optional[str]:
-    """
-    Download a video URL to a temp file.
-    Returns the temp file path, or None on failure.
-    Caller is responsible for deleting the file.
-    """
+    """Download a video URL to a temp file."""
     try:
         req = urllib.request.Request(url, headers=HEADERS)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -197,75 +176,85 @@ def import_highlights(
     fetch_thumbnails: bool = True,
 ) -> ImportResult:
     """
-    Import Highlightly highlights into ShortVideo.
+    Import a large batch of Highlightly highlights into ShortVideo.
 
-    For each highlight:
-      1. Download the video file to a temp file
-      2. Upload to Firebase Storage → get public URL
-      3. Save ShortVideo with firebase_url stored in caption metadata
-         (video FileField stores the Firebase path)
-      4. Download + upload thumbnail the same way
+    Optimized for high volume:
+      1. Prefetches existing markers to minimize verification overhead.
+      2. Segregates network actions (downloads/uploads) outside DB transactions.
+      3. Uses micro-transactions per record to isolate unexpected processing errors.
     """
     from ..models import ShortVideo
 
     result = ImportResult()
+    if not highlights:
+        return result
 
+    # ── High-Volume Optimization: Prefetch Existing Records ──────────────────
+    valid_highlights = []
     for h in highlights:
-        highlight_id = h.get("id")
-        if not highlight_id:
+        h_id = h.get("id")
+        if h_id:
+            valid_highlights.append(h)
+        else:
             result.errors.append({"highlight": h, "error": "Missing id"})
-            continue
 
+    if not valid_highlights:
+        return result
+
+    # Get prefixes for bulk checking to avoid doing N database queries
+    markers = [f"[highlightly:{h.get('id')}]" for h in valid_highlights]
+    
+    # Identify items that match any element of our markers list
+    existing_captions = set(
+        ShortVideo.objects.filter(
+            caption__regex=r"^\[highlightly:(" + "|".join(str(h.get('id')) for h in valid_highlights) + r")\]"
+        ).values_list("caption", flat=True)
+    )
+
+    # ── Core Iteration Loop ──────────────────────────────────────────────────
+    for h in valid_highlights:
+        highlight_id = h.get("id")
         marker = f"[highlightly:{highlight_id}]"
 
-        # Determine best video URL to download
+        # Bulk duplicate validation
+        if any(cap.startswith(marker) for cap in existing_captions):
+            result.skipped += 1
+            continue
+
         video_url = h.get("url") or h.get("embedUrl") or ""
-        source    = h.get("source", "").lower()
+        source = h.get("source", "").lower()
 
         tmp_video_path = None
         tmp_thumb_path = None
+        firebase_video_url = ""
 
         try:
-            with transaction.atomic():
-                # ── Duplicate check ───────────────────────────────────────
-                if ShortVideo.objects.filter(caption__startswith=marker).exists():
-                    result.skipped += 1
-                    continue
+            # ── 1. External Network Pipeline (CRITICAL: Outside database transaction) ──
+            if _is_downloadable_url(video_url):
+                logger.info("Processing media [%s] from %s", highlight_id, video_url)
+                tmp_video_path = _download_video(video_url)
 
-                # ── Resolve FKs ───────────────────────────────────────────
-                match_data  = h.get("match", {}) or {}
-                league      = _resolve_league(match_data.get("league"))
-                team        = _resolve_team(match_data.get("homeTeam"))
-                caption     = marker + "\n" + _build_caption(h)
-
-                # ── Download + upload video ───────────────────────────────
-                firebase_video_url = ""
-
-                if _is_downloadable_url(video_url):
-                    logger.info("Downloading video for highlight %s from %s", highlight_id, video_url)
-                    tmp_video_path = _download_video(video_url)
-
-                    if tmp_video_path:
-                        firebase_blob = f"shorts/highlights/{highlight_id}.mp4"
-                        try:
-                            firebase_video_url = _upload_to_firebase(tmp_video_path, firebase_blob)
-                            logger.info("Uploaded to Firebase: %s", firebase_video_url)
-                        except Exception as fb_exc:
-                            logger.warning("Firebase upload failed for %s: %s", highlight_id, fb_exc)
-                    else:
-                        logger.warning("Could not download video for highlight %s", highlight_id)
+                if tmp_video_path:
+                    firebase_blob = f"shorts/highlights/{highlight_id}.mp4"
+                    try:
+                        firebase_video_url = _upload_to_firebase(tmp_video_path, firebase_blob)
+                    except Exception as fb_exc:
+                        logger.warning("Firebase upload failed for %s: %s", highlight_id, fb_exc)
                 else:
-                    logger.info(
-                        "Skipping download for highlight %s — source '%s' not directly downloadable",
-                        highlight_id, source
-                    )
+                    logger.warning("Download timed out or failed for highlight %s", highlight_id)
+            else:
+                logger.info("Skipping stream fetch for %s — unhandled host source: %s", highlight_id, source)
 
-                # Store Firebase URL in caption so serializer can return it
-                # until you add a proper external_url field via migration
+            # ── 2. Short Database Writing Routine (Scoped & Isolated) ─────────────────
+            with transaction.atomic():
+                match_data = h.get("match", {}) or {}
+                league = _resolve_league(match_data.get("league"))
+                team = _resolve_team(match_data.get("homeTeam"))
+                caption = marker + "\n" + _build_caption(h)
+
                 if firebase_video_url:
                     caption += f"\nfirebase_url:{firebase_video_url}"
                 elif video_url:
-                    # Fallback: store original URL so video isn't completely broken
                     caption += f"\nexternal_url:{video_url}"
 
                 instance = ShortVideo(
@@ -277,7 +266,7 @@ def import_highlights(
                 )
                 instance.save()
 
-                # ── Download + upload thumbnail ───────────────────────────
+                # Process thumbnail adjustments within the transaction
                 thumb_url = h.get("imgUrl")
                 if fetch_thumbnails and thumb_url:
                     tmp_thumb_path = _download_thumbnail(thumb_url)
@@ -287,14 +276,10 @@ def import_highlights(
                             firebase_thumb_url = _upload_thumbnail_to_firebase(
                                 tmp_thumb_path, firebase_thumb_blob
                             )
-                            # Save thumbnail URL — store as ContentFile with the Firebase URL
-                            # so Django's ImageField name holds the blob path
                             instance.thumbnail.name = firebase_thumb_blob
                             instance.save(update_fields=["thumbnail"])
-                            logger.info("Thumbnail uploaded: %s", firebase_thumb_url)
                         except Exception as thumb_exc:
-                            logger.warning("Thumbnail Firebase upload failed: %s", thumb_exc)
-                            # Fallback: download bytes and save via Django storage
+                            logger.warning("Firebase thumbnail upload failed: %s, using fallback", thumb_exc)
                             try:
                                 with open(tmp_thumb_path, "rb") as f:
                                     instance.thumbnail.save(
@@ -306,14 +291,14 @@ def import_highlights(
                                 pass
 
                 result.created += 1
-                logger.info("Imported highlight %s → ShortVideo %s", highlight_id, instance.pk)
+                logger.info("Successfully indexed highlight %s", highlight_id)
 
         except Exception as exc:
-            logger.exception("Failed to import highlight %s: %s", highlight_id, exc)
+            logger.exception("Failed processing record row execution %s: %s", highlight_id, exc)
             result.errors.append({"highlight_id": highlight_id, "error": str(exc)})
 
         finally:
-            # Always clean up temp files
+            # Clean local files after every pass
             for path in (tmp_video_path, tmp_thumb_path):
                 if path and os.path.exists(path):
                     try:

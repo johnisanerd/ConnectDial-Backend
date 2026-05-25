@@ -2,31 +2,9 @@
 Management command: fetch_highlights
 =====================================
 Pulls sport highlights from the Highlightly API and saves them to the
-ShortVideo table.  Designed to be run by a superadmin (cron / manual).
+ShortVideo table. Designed to be run by a superadmin (cron / manual).
 
-Usage examples
-──────────────
-# Today's football highlights (default)
-python manage.py fetch_highlights
-
-# Specific sport + date
-python manage.py fetch_highlights --sport basketball --date 2026-05-20
-
-# Filter by league
-python manage.py fetch_highlights --sport football --league-name "Premier League"
-
-# Limit & paginate
-python manage.py fetch_highlights --limit 40 --offset 0
-
-# Dry-run (print what would be imported, don't save)
-python manage.py fetch_highlights --dry-run
-
-Environment / settings required
-────────────────────────────────
-Add to your Django settings:
-
-    HIGHLIGHTLY_API_KEY = "your-key-here"   # required
-    HIGHLIGHTLY_SPORT   = "football"        # optional default
+Updated: Supports automatic pagination to safely extract large media batches.
 """
 
 import json
@@ -77,13 +55,19 @@ class Command(BaseCommand):
             "--limit",
             default=40,
             type=int,
-            help="Max highlights to fetch per call (max 40).",
+            help="Max highlights to fetch per individual API call (max 40).",
         )
         parser.add_argument(
             "--offset",
             default=0,
             type=int,
-            help="Pagination offset.",
+            help="Initial pagination offset start point.",
+        )
+        parser.add_argument(
+            "--all-pages",
+            action="store_true",
+            dest="all_pages",
+            help="Auto-paginate through all available pages matching criteria until exhausted.",
         )
         parser.add_argument(
             "--no-thumbnails",
@@ -128,70 +112,110 @@ class Command(BaseCommand):
         )
 
         fetch_date = options.get("date") or str(date.today())
+        
+        # Determine execution loop rules
+        current_offset = options["offset"]
+        single_page_limit = min(options["limit"], 40)
+        auto_paginate = options["all_pages"]
+        
+        # Track historical batch sums across cycles
+        total_created = 0
+        total_skipped = 0
+        total_errors = []
+
+        client = HighlightlyClient(api_key=api_key)
+        system_user = None if options["dry_run"] else get_or_create_system_user()
 
         self.stdout.write(self.style.MIGRATE_HEADING(
-            f"\n=== Highlightly Import ===\n"
-            f"  Sport  : {sport}\n"
-            f"  Date   : {fetch_date}\n"
-            f"  Limit  : {options['limit']}  Offset: {options['offset']}\n"
-            f"  Dry run: {options['dry_run']}\n"
+            f"\n=== Highlightly Import Process Started ===\n"
+            f"  Sport       : {sport}\n"
+            f"  Date        : {fetch_date}\n"
+            f"  Base Limit  : {single_page_limit}\n"
+            f"  Auto-Page   : {auto_paginate}\n"
+            f"  Dry run     : {options['dry_run']}\n"
         ))
 
-        # ── Fetch from API ────────────────────────────────────────────────
-        client = HighlightlyClient(api_key=api_key)
+        # Max safety iterations to guard against malicious/broken APIs infinite-looping
+        max_loops = 100 
+        loop_count = 0
 
-        try:
-            highlights = client.get_highlights(
-                sport=sport,
-                date=fetch_date,
-                league_id=options.get("league_id"),
-                league_name=options.get("league_name"),
-                country_code=options.get("country_code"),
-                limit=min(options["limit"], 40),
-                offset=options["offset"],
-            )
-        except Exception as exc:
-            raise CommandError(f"Highlightly API error: {exc}") from exc
+        while True:
+            loop_count += 1
+            if loop_count > max_loops:
+                self.stdout.write(self.style.WARNING("Loop safeguard triggered. Exiting batching lifecycle."))
+                break
 
-        self.stdout.write(f"  Fetched {len(highlights)} highlights from API.\n")
+            self.stdout.write(f" -> Fetching page at offset {current_offset}...")
 
-        if not highlights:
-            self.stdout.write(self.style.WARNING("No highlights returned. Nothing to import."))
-            return
-
-        # ── Dry run ───────────────────────────────────────────────────────
-        if options["dry_run"]:
-            self.stdout.write(self.style.SUCCESS("\n[DRY RUN] Would import:"))
-            for h in highlights:
-                match = h.get("match", {}) or {}
-                league = (match.get("league") or {}).get("name", "?")
-                home   = (match.get("homeTeam") or {}).get("name", "?")
-                away   = (match.get("awayTeam") or {}).get("name", "?")
-                self.stdout.write(
-                    f"  [{h.get('type','?')}] id={h.get('id')} | "
-                    f"{home} vs {away} | {league} | {h.get('title','')[:60]}"
+            # ── Fetch from API ────────────────────────────────────────────────
+            try:
+                highlights = client.get_highlights(
+                    sport=sport,
+                    date=fetch_date,
+                    league_id=options.get("league_id"),
+                    league_name=options.get("league_name"),
+                    country_code=options.get("country_code"),
+                    limit=single_page_limit,
+                    offset=current_offset,
                 )
-            return
+            except Exception as exc:
+                raise CommandError(f"Highlightly API error on offset {current_offset}: {exc}") from exc
 
-        # ── Import ────────────────────────────────────────────────────────
-        system_user = get_or_create_system_user()
+            fetched_count = len(highlights)
+            self.stdout.write(f"    Fetched {fetched_count} records from API.")
 
-        result = import_highlights(
-            highlights,
-            system_user=system_user,
-            sport=sport,
-            fetch_thumbnails=not options["no_thumbnails"],
-        )
+            if not highlights:
+                if loop_count == 1:
+                    self.stdout.write(self.style.WARNING("No highlights returned. Nothing to import."))
+                else:
+                    self.stdout.write("No more highlights found. Stream reached its tail end.")
+                break
 
-        # ── Report ────────────────────────────────────────────────────────
+            # ── Dry run Execution Page Block ──────────────────────────────────
+            if options["dry_run"]:
+                self.stdout.write(self.style.SUCCESS(f"    [DRY RUN] Page evaluation visualization:"))
+                for h in highlights:
+                    match = h.get("match", {}) or {}
+                    league = (match.get("league") or {}).get("name", "?")
+                    home   = (match.get("homeTeam") or {}).get("name", "?")
+                    away   = (match.get("awayTeam") or {}).get("name", "?")
+                    self.stdout.write(
+                        f"      [{h.get('type','?')}] id={h.get('id')} | "
+                        f"{home} vs {away} | {league} | {h.get('title','')[:60]}"
+                    )
+                
+                total_created += fetched_count
+            
+            # ── Live Production Data Extraction ────────────────────────────────
+            else:
+                result = import_highlights(
+                    highlights,
+                    system_user=system_user,
+                    sport=sport,
+                    fetch_thumbnails=not options["no_thumbnails"],
+                )
+                
+                total_created += result.created
+                total_skipped += result.skipped
+                if result.errors:
+                    total_errors.extend(result.errors)
+
+            # Break logic check 
+            if not auto_paginate or fetched_count < single_page_limit:
+                break
+                
+            # Advance structural array pointer
+            current_offset += single_page_limit
+
+        # ── Global Execution Batch Metrics Report ──────────────────────────────
         self.stdout.write(self.style.SUCCESS(
-            f"\n✓ Import complete:\n"
-            f"  Created : {result.created}\n"
-            f"  Skipped : {result.skipped}  (already in DB)\n"
-            f"  Errors  : {len(result.errors)}\n"
+            f"\n✓ Global Batch Execution Finalized:\n"
+            f"  Total Processed Created : {total_created}\n"
+            f"  Total Duplicates Skipped: {total_skipped}\n"
+            f"  Total Validation Errors : {len(total_errors)}\n"
         ))
 
-        if result.errors:
-            self.stdout.write(self.style.ERROR("Errors:"))
-            for err in result.errors:
+        if total_errors:
+            self.stdout.write(self.style.ERROR("Errors Summary:"))
+            for err in total_errors[:50]:  # Cap console display output print count
                 self.stdout.write(f"  {json.dumps(err)}")
