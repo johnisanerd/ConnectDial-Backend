@@ -80,6 +80,46 @@ def _author_dict(user, request):
     }
 
 
+def _extract_highlight_url(caption: str) -> str | None:
+    """
+    Extract the video URL embedded in a Highlightly-imported caption.
+
+    Caption format:
+        [highlightly:{id}]
+        {title}
+        {description}
+        firebase_url:{url}    ← preferred
+        external_url:{url}    ← fallback
+    """
+    if not caption or not caption.startswith('[highlightly:'):
+        return None
+    for line in caption.split('\n'):
+        if line.startswith('firebase_url:'):
+            return line[len('firebase_url:'):].strip()
+        if line.startswith('external_url:'):
+            return line[len('external_url:'):].strip()
+    return None
+
+
+def _clean_caption(caption: str) -> str:
+    """
+    Return a user-facing caption with the internal marker lines stripped out.
+    Removes the [highlightly:...] marker, firebase_url:, and external_url: lines.
+    """
+    if not caption:
+        return caption
+    lines = []
+    for line in caption.split('\n'):
+        if line.startswith('[highlightly:'):
+            continue
+        if line.startswith('firebase_url:'):
+            continue
+        if line.startswith('external_url:'):
+            continue
+        lines.append(line)
+    return '\n'.join(lines).strip()
+
+
 # ─────────────────────────────────────────────────────────────
 # SUPPORT MIXIN
 # ─────────────────────────────────────────────────────────────
@@ -286,6 +326,9 @@ class ShortVideoSerializer(
 
     is_liked = serializers.SerializerMethodField()
 
+    # Return clean caption without internal marker lines
+    caption = serializers.SerializerMethodField()
+
     class Meta:
         model = ShortVideo
 
@@ -318,7 +361,13 @@ class ShortVideoSerializer(
         return _author_dict(obj.author, request)
 
     def get_video_url(self, obj):
+        # ── Highlightly-imported video ────────────────────────────────────
+        # Check caption for firebase_url or external_url embedded by importer
+        highlight_url = _extract_highlight_url(obj.caption)
+        if highlight_url:
+            return highlight_url
 
+        # ── Normal locally uploaded video ─────────────────────────────────
         request = self.context.get('request')
 
         path = f"/api/videos/shorts/{obj.pk}/stream/"
@@ -354,6 +403,10 @@ class ShortVideoSerializer(
             ).exists()
 
         return False
+
+    def get_caption(self, obj):
+        """Return caption with internal Highlightly marker lines stripped."""
+        return _clean_caption(obj.caption)
 
     def get_league_details(self, obj):
 
