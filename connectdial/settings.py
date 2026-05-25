@@ -486,3 +486,10 @@ CACHES = {
         "KEY_PREFIX": "connectdial",
     }
 }
+DATA_UPLOAD_MAX_MEMORY_SIZE = 2147483648
+FILE_UPLOAD_MAX_MEMORY_SIZE = 52428800
+
+FILE_UPLOAD_HANDLERS = [
+    "django.core.files.uploadhandler.MemoryFileUploadHandler",
+    "django.core.files.uploadhandler.TemporaryFileUploadHandler",
+]
