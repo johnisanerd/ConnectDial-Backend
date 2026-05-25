@@ -193,7 +193,7 @@ class ShortVideoUploadView(generics.CreateAPIView):
             duration=0,
             league=league,
             team=team,
-            status='draft',
+            status='published',
             video=video_file,
         )
 
