@@ -4,7 +4,7 @@ Management command: fetch_highlights
 Pulls sport highlights from the Highlightly API and saves them to the
 ShortVideo table. Designed to be run by a superadmin (cron / manual).
 
-Updated: Supports automatic pagination to safely extract large media batches.
+Updated: Integrates optimized pre-fetch evaluation checks inside dry-runs.
 """
 
 import json
@@ -94,6 +94,7 @@ class Command(BaseCommand):
             import_highlights,
             get_or_create_system_user,
         )
+        from short_videos.models import ShortVideo
 
         # ── Resolve API key ───────────────────────────────────────────────
         api_key = (
@@ -113,12 +114,10 @@ class Command(BaseCommand):
 
         fetch_date = options.get("date") or str(date.today())
         
-        # Determine execution loop rules
         current_offset = options["offset"]
         single_page_limit = min(options["limit"], 40)
         auto_paginate = options["all_pages"]
         
-        # Track historical batch sums across cycles
         total_created = 0
         total_skipped = 0
         total_errors = []
@@ -135,7 +134,6 @@ class Command(BaseCommand):
             f"  Dry run     : {options['dry_run']}\n"
         ))
 
-        # Max safety iterations to guard against malicious/broken APIs infinite-looping
         max_loops = 100 
         loop_count = 0
 
@@ -173,18 +171,37 @@ class Command(BaseCommand):
 
             # ── Dry run Execution Page Block ──────────────────────────────────
             if options["dry_run"]:
+                valid_highlights = [h for h in highlights if h.get("id")]
+                
+                # Performance Optimization: Emulate bulk DB checking matching our updated importer
+                existing_captions = set()
+                if valid_highlights:
+                    existing_captions = set(
+                        ShortVideo.objects.filter(
+                            caption__regex=r"^\[highlightly:(" + "|".join(str(h.get('id')) for h in valid_highlights) + r")\]"
+                        ).values_list("caption", flat=True)
+                    )
+
                 self.stdout.write(self.style.SUCCESS(f"    [DRY RUN] Page evaluation visualization:"))
                 for h in highlights:
+                    highlight_id = h.get("id")
+                    if not highlight_id:
+                        self.stdout.write(self.style.ERROR(f"      [ERROR] Missing ID for record: {h.get('title', 'Unknown')}"))
+                        continue
+
+                    marker = f"[highlightly:{highlight_id}]"
                     match = h.get("match", {}) or {}
                     league = (match.get("league") or {}).get("name", "?")
                     home   = (match.get("homeTeam") or {}).get("name", "?")
                     away   = (match.get("awayTeam") or {}).get("name", "?")
-                    self.stdout.write(
-                        f"      [{h.get('type','?')}] id={h.get('id')} | "
-                        f"{home} vs {away} | {league} | {h.get('title','')[:60]}"
-                    )
-                
-                total_created += fetched_count
+                    
+                    # Track what would be skipped based on bulk-check calculation
+                    if any(cap.startswith(marker) for cap in existing_captions):
+                        self.stdout.write(f"      [SKIPPED] Already exists | id={highlight_id} | {home} vs {away}")
+                        total_skipped += 1
+                    else:
+                        self.stdout.write(f"      [WOULD IMPORT] id={highlight_id} | {home} vs {away} | {league} | {h.get('title','')[:40]}")
+                        total_created += 1
             
             # ── Live Production Data Extraction ────────────────────────────────
             else:
@@ -200,22 +217,21 @@ class Command(BaseCommand):
                 if result.errors:
                     total_errors.extend(result.errors)
 
-            # Break logic check 
             if not auto_paginate or fetched_count < single_page_limit:
                 break
                 
-            # Advance structural array pointer
             current_offset += single_page_limit
 
         # ── Global Execution Batch Metrics Report ──────────────────────────────
+        action_verb = "Simulated" if options["dry_run"] else "Processed"
         self.stdout.write(self.style.SUCCESS(
             f"\n✓ Global Batch Execution Finalized:\n"
-            f"  Total Processed Created : {total_created}\n"
+            f"  Total {action_verb} Created : {total_created}\n"
             f"  Total Duplicates Skipped: {total_skipped}\n"
             f"  Total Validation Errors : {len(total_errors)}\n"
         ))
 
         if total_errors:
             self.stdout.write(self.style.ERROR("Errors Summary:"))
-            for err in total_errors[:50]:  # Cap console display output print count
+            for err in total_errors[:50]:
                 self.stdout.write(f"  {json.dumps(err)}")
