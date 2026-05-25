@@ -2,8 +2,7 @@
 ConnectDial — Highlightly → ShortVideo Importer
 =================================================
 Downloads highlight videos from Highlightly and uploads them to
-Firebase Storage, storing the public Firebase URL in ShortVideo.video
-(as a URLField-compatible path) so the app streams from your own bucket.
+Firebase Storage, storing the paths directly into Django model fields.
 """
 
 import logging
@@ -46,7 +45,7 @@ class ImportResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIREBASE UPLOAD
+# FIREBASE UPLOAD (Optimized: No slow programmatic ACL calls)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _upload_to_firebase(local_path: str, destination_blob: str) -> str:
@@ -55,16 +54,12 @@ def _upload_to_firebase(local_path: str, destination_blob: str) -> str:
     from firebase_admin import storage
     from django.conf import settings
 
-    # Explicitly pull the bucket configuration verified in your settings.py
     bucket_name = getattr(settings, "GS_BUCKET_NAME", "connect-c894b.firebasestorage.app")
-    
     bucket = storage.bucket(bucket_name)
     blob = bucket.blob(destination_blob)
+
+    # Content type ensures browsers stream instead of downloading as an attachment
     blob.upload_from_filename(local_path, content_type="video/mp4")
-
-    # Make the file publicly readable
-    blob.make_public()
-
     return blob.public_url
 
 
@@ -74,16 +69,11 @@ def _upload_thumbnail_to_firebase(local_path: str, destination_blob: str) -> str
     from firebase_admin import storage
     from django.conf import settings
 
-    # Explicitly pull the bucket configuration verified in your settings.py
     bucket_name = getattr(settings, "GS_BUCKET_NAME", "connect-c894b.firebasestorage.app")
-    
     bucket = storage.bucket(bucket_name)
     blob = bucket.blob(destination_blob)
+
     blob.upload_from_filename(local_path, content_type="image/jpeg")
-    
-    # Make the file publicly readable
-    blob.make_public()
-    
     return blob.public_url
 
 
@@ -91,11 +81,9 @@ def _upload_thumbnail_to_firebase(local_path: str, destination_blob: str) -> str
 # DOWNLOAD HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-_DOWNLOADABLE_SOURCES = ("streamable", "oddsjam", "scorebat", "dailymotion")
-
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     )
@@ -110,13 +98,12 @@ def _is_downloadable_url(url: str) -> bool:
     return not any(s in url for s in skip)
 
 
-def _download_video(url: str, timeout: int = 120) -> Optional[str]:
+def _download_video(url: str, timeout: int = 60) -> Optional[str]:
     """Download a video URL to a temp file."""
     try:
         req = urllib.request.Request(url, headers=HEADERS)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            suffix = ".mp4"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
                 tmp_path = tmp.name
                 chunk_size = 1024 * 512  # 512 KB
                 while True:
@@ -190,9 +177,9 @@ def import_highlights(
     Import a large batch of Highlightly highlights into ShortVideo.
 
     Optimized for high volume:
-      1. Prefetches existing markers to minimize verification overhead.
-      2. Segregates network actions (downloads/uploads) outside DB transactions.
-      3. Uses micro-transactions per record to isolate unexpected processing errors.
+      1. Prefetches existing markers using fast SQL list filtering.
+      2. Runs external network transactions outside atomic SQL save cycles.
+      3. Implements strict top-of-loop scope sanitization to prevent UnboundLocalErrors.
     """
     from ..models import ShortVideo
 
@@ -212,13 +199,13 @@ def import_highlights(
     if not valid_highlights:
         return result
 
-    # Get prefixes for bulk checking to avoid doing N database queries
-    markers = [f"[highlightly:{h.get('id')}]" for h in valid_highlights]
-    
-    # Identify items that match any element of our markers list
+    # Standard clean list approach rather than unescaped regex characters
+    expected_markers = [f"[highlightly:{h.get('id')}]" for h in valid_highlights]
+
+    # Fast bulk check to minimize execution lag
     existing_captions = set(
         ShortVideo.objects.filter(
-            caption__regex=r"^\[highlightly:(" + "|".join(str(h.get('id')) for h in valid_highlights) + r")\]"
+            caption__in=expected_markers
         ).values_list("caption", flat=True)
     )
 
@@ -227,8 +214,8 @@ def import_highlights(
         highlight_id = h.get("id")
         marker = f"[highlightly:{highlight_id}]"
 
-        # Bulk duplicate validation
-        if any(cap.startswith(marker) for cap in existing_captions):
+        # Bulk duplicate validation lookup check
+        if marker in existing_captions:
             result.skipped += 1
             continue
 
@@ -237,7 +224,10 @@ def import_highlights(
 
         tmp_video_path = None
         tmp_thumb_path = None
+
+        # ✅ Scope Sanitization: Variables are explicitly initialized every cycle
         firebase_video_url = ""
+        firebase_thumb_url = ""
 
         try:
             # ── 1. Pipeline Stage A: Run Network Calls OUTSIDE DB Transactions ──
@@ -257,13 +247,17 @@ def import_highlights(
                 if tmp_thumb_path:
                     firebase_thumb_blob = f"shorts/highlights/thumbs/{highlight_id}.jpg"
                     try:
-                        # ✅ Fix: Assign the result to firebase_thumb_url so it resolves below
                         firebase_thumb_url = _upload_thumbnail_to_firebase(tmp_thumb_path, firebase_thumb_blob)
                     except Exception as fb_exc:
                         logger.warning("Firebase thumbnail push dropped for %s: %s", highlight_id, fb_exc)
 
             # ── 2. Pipeline Stage B: Fast Database Persistence ─────────────────
             with transaction.atomic():
+                # Perform a defensive real-time duplicate check inside the atomic row transaction
+                if ShortVideo.objects.filter(caption__startswith=marker).exists():
+                    result.skipped += 1
+                    continue
+
                 match_data = h.get("match", {}) or {}
                 league = _resolve_league(match_data.get("league"))
                 team = _resolve_team(match_data.get("homeTeam"))
@@ -282,7 +276,7 @@ def import_highlights(
                     status="published",
                 )
 
-                # ✅ Explicit field mapping to direct bucket paths strings
+                # Assign direct path strings back to file fields
                 if firebase_video_url:
                     instance.video = f"shorts/highlights/{highlight_id}.mp4"
 
@@ -300,12 +294,13 @@ def import_highlights(
                 instance.save()
                 result.created += 1
                 logger.info("Successfully indexed highlight %s", highlight_id)
+
         except Exception as exc:
             logger.exception("Failed processing record row execution %s: %s", highlight_id, exc)
             result.errors.append({"highlight_id": highlight_id, "error": str(exc)})
 
         finally:
-            # Clean local files after every pass
+            # Clean local temp file scrap pads
             for path in (tmp_video_path, tmp_thumb_path):
                 if path and os.path.exists(path):
                     try:

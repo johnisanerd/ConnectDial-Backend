@@ -166,13 +166,17 @@ class Command(BaseCommand):
                     self.stdout.write("No more highlights found. Stream reached its tail end.")
                 break
 
+            # ── Dry-Run Processing Strategy Block ─────────────────────────────
             if options["dry_run"]:
                 valid_highlights = [h for h in highlights if h.get("id")]
                 existing_captions = set()
+
                 if valid_highlights:
+                    # Optimized direct lookup calculation matching our updated importer engine
+                    expected_markers = [f"[highlightly:{h.get('id')}]" for h in valid_highlights]
                     existing_captions = set(
                         ShortVideo.objects.filter(
-                            caption__regex=r"^\[highlightly:(" + "|".join(str(h.get('id')) for h in valid_highlights) + r")\]"
+                            caption__in=expected_markers
                         ).values_list("caption", flat=True)
                     )
 
@@ -188,12 +192,14 @@ class Command(BaseCommand):
                     home   = (match.get("homeTeam") or {}).get("name", "?")
                     away   = (match.get("awayTeam") or {}).get("name", "?")
 
-                    if any(cap.startswith(marker) for cap in existing_captions):
+                    if marker in existing_captions:
                         self.stdout.write(f"      [SKIPPED] Already exists | id={highlight_id} | {home} vs {away}")
                         total_skipped += 1
                     else:
                         self.stdout.write(f"      [WOULD IMPORT] id={highlight_id} | {home} vs {away} | {league}")
                         total_created += 1
+
+            # ── Production Run Processing Block ────────────────────────────────
             else:
                 result = import_highlights(
                     highlights,
