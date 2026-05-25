@@ -72,44 +72,36 @@ from .video_processing import (
 User = get_user_model()
 
 
-
 def _request_data_as_dict(request_data):
     """
     Convert request.data to a plain Python dict.
     Django's QueryDict (used for form/multipart requests) stores every value
     as a list — .dict() collapses each to its last value.
     """
-
     if hasattr(request_data, 'dict'):
         return request_data.dict()
-
     return dict(request_data)
 
+
 class ShortVideoUploadView(generics.CreateAPIView):
-
     serializer_class = ShortVideoCreateSerializer
-
     permission_classes = [IsAuthenticated]
-
     parser_classes = [MultiPartParser, FormParser]
 
     def create(self, request, *args, **kwargs):
+        # Convert QueryDict securely into a standard plain python map layout array
+        data_dict = _request_data_as_dict(request.data)
 
         serializer = self.get_serializer(data=request.data)
-
         serializer.is_valid(raise_exception=True)
 
         try:
-
             instance = self.perform_create(serializer)
-
         except Exception as exc:
-
             if any(
                 x in str(exc).lower()
                 for x in ["too large", "2gb", "maximum"]
             ):
-
                 return Response(
                     {
                         "video": [
@@ -118,7 +110,6 @@ class ShortVideoUploadView(generics.CreateAPIView):
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
             raise
 
         instance.refresh_from_db()
@@ -134,95 +125,70 @@ class ShortVideoUploadView(generics.CreateAPIView):
         )
 
     def perform_create(self, serializer):
-
         video_file = (
-            self.request.FILES.get('file')
-            or self.request.FILES.get('video')
+            self.request.FILES.get('video')
+            or self.request.FILES.get('file')
         )
 
         # ─────────────────────────────────────────────
         # LEAGUE
         # ─────────────────────────────────────────────
-
         league = None
-
         league_id = (
             self.request.data.get('league_id')
             or self.request.data.get('league')
         )
-
         if league_id:
-
             try:
-
                 from leagues.models import League
-
                 league = League.objects.get(pk=league_id)
-
             except Exception:
                 pass
 
         # ─────────────────────────────────────────────
         # TEAM
         # ─────────────────────────────────────────────
-
         team = None
-
         team_id = (
             self.request.data.get('team_id')
             or self.request.data.get('team')
         )
-
         if team_id:
-
             try:
-
                 from leagues.models import Team
-
                 team = Team.objects.get(pk=team_id)
-
             except Exception:
                 pass
 
-        # ─────────────────────────────────────────────
-        # FAST SAVE
-        # ─────────────────────────────────────────────
-
+        # Native devices compress beautifully beforehand. We save in published mode
+        # and handle secondary meta generation via background tasks safely.
         instance = serializer.save(
             author=self.request.user,
             duration=0,
             league=league,
             team=team,
-            status='draft',
+            status='published',
             video=video_file,
         )
 
         # ─────────────────────────────────────────────
-        # BACKGROUND PROCESSING
+        # BACKGROUND THUMBNAIL/DURATION PROCESSING
         # ─────────────────────────────────────────────
-
         try:
-
             from .tasks import process_short_video
-
             process_short_video.delay(str(instance.pk))
-
         except Exception:
-
             t = threading.Thread(
                 target=self._save_raw_and_publish_fast,
                 args=(instance,),
                 daemon=True,
             )
-
             t.start()
 
         return instance
 
     def _save_raw_and_publish_fast(self, instance):
-
         try:
-
             if not instance.video:
                 return
 
@@ -231,54 +197,36 @@ class ShortVideoUploadView(generics.CreateAPIView):
             # ─────────────────────────────────────────
             # DURATION
             # ─────────────────────────────────────────
-
             try:
                 duration = extract_duration(video_path)
-
             except Exception:
                 duration = 0
 
             instance.duration = duration
-
             update_fields = ['duration']
 
             # ─────────────────────────────────────────
             # THUMBNAIL
             # ─────────────────────────────────────────
-
             try:
-
                 thumb_bytes = generate_thumbnail(video_path)
-
                 instance.thumbnail.save(
                     f'thumb_{instance.pk}.jpg',
                     ContentFile(thumb_bytes),
                     save=False,
                 )
-
                 update_fields.append('thumbnail')
-
             except Exception:
                 pass
 
-            # ─────────────────────────────────────────
-            # PUBLISH
-            # ─────────────────────────────────────────
-
             instance.status = 'published'
-
             update_fields.append('status')
-
             instance.save(update_fields=update_fields)
 
         except Exception:
-
             try:
-
                 instance.status = 'published'
-
                 instance.save(update_fields=['status'])
-
             except Exception:
                 pass
 
@@ -288,23 +236,17 @@ class ShortVideoUploadView(generics.CreateAPIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ShortVideoPagination(LimitOffsetPagination):
-
     default_limit = 10
-
     max_limit = 20
 
 
 class ShortVideoFeedView(ListAPIView):
-
     authentication_classes = [
         TokenAuthentication,
         SessionAuthentication
     ]
-
     permission_classes = [IsAuthenticatedOrReadOnly]
-
     serializer_class = ShortVideoSerializer
-
     pagination_class = ShortVideoPagination
 
     def get_queryset(self):
@@ -312,13 +254,9 @@ class ShortVideoFeedView(ListAPIView):
         Fetches personalized ranked feeds using your advanced ranking engine
         when authenticated, falling back to a clean chronological list for guests.
         """
-
         user = self.request.user
-
         if user and user.is_authenticated:
-
             from .feed_algorithm import get_short_video_feed
-
             return get_short_video_feed(user)
 
         return (
@@ -338,11 +276,8 @@ class ShortVideoFeedView(ListAPIView):
         )
 
     def get_serializer_context(self):
-
         ctx = super().get_serializer_context()
-
         ctx['request'] = self.request
-
         return ctx
 
 
@@ -351,18 +286,14 @@ class ShortVideoFeedView(ListAPIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ShortVideoStreamView(APIView):
-
     authentication_classes = [
         TokenAuthentication,
         SessionAuthentication
     ]
-
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, pk):
-
         video = get_object_or_404(ShortVideo, pk=pk)
-
         return stream_video_response(request, video)
 
 
@@ -371,33 +302,25 @@ class ShortVideoStreamView(APIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VideoLikeToggleView(APIView):
-
     authentication_classes = [
         TokenAuthentication,
         SessionAuthentication
     ]
-
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-
         video = get_object_or_404(ShortVideo, pk=pk)
-
         like = VideoLike.objects.filter(
             user=request.user,
             video=video
         ).first()
 
         if like:
-
             like.delete()
-
             ShortVideo.objects.filter(pk=pk).update(
                 cached_likes=F('cached_likes') - 1
             )
-
             video.refresh_from_db(fields=['cached_likes'])
-
             return Response(
                 {
                     'liked': False,
@@ -410,13 +333,10 @@ class VideoLikeToggleView(APIView):
             user=request.user,
             video=video
         )
-
         ShortVideo.objects.filter(pk=pk).update(
             cached_likes=F('cached_likes') + 1
         )
-
         video.refresh_from_db(fields=['cached_likes'])
-
         return Response(
             {
                 'liked': True,
@@ -424,8 +344,6 @@ class VideoLikeToggleView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
-
-
 
 
 class VideoViewRecordView(APIView):
