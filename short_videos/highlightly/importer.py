@@ -53,8 +53,12 @@ def _upload_to_firebase(local_path: str, destination_blob: str) -> str:
     """Upload a local file to Firebase Storage and return its public URL."""
     import firebase_admin
     from firebase_admin import storage
+    from django.conf import settings
 
-    bucket = storage.bucket()
+    # Explicitly pull the bucket configuration verified in your settings.py
+    bucket_name = getattr(settings, "GS_BUCKET_NAME", "connect-c894b.firebasestorage.app")
+    
+    bucket = storage.bucket(bucket_name)
     blob = bucket.blob(destination_blob)
     blob.upload_from_filename(local_path, content_type="video/mp4")
 
@@ -68,11 +72,18 @@ def _upload_thumbnail_to_firebase(local_path: str, destination_blob: str) -> str
     """Upload a thumbnail image to Firebase Storage and return its public URL."""
     import firebase_admin
     from firebase_admin import storage
+    from django.conf import settings
 
-    bucket = storage.bucket()
+    # Explicitly pull the bucket configuration verified in your settings.py
+    bucket_name = getattr(settings, "GS_BUCKET_NAME", "connect-c894b.firebasestorage.app")
+    
+    bucket = storage.bucket(bucket_name)
     blob = bucket.blob(destination_blob)
     blob.upload_from_filename(local_path, content_type="image/jpeg")
+    
+    # Make the file publicly readable
     blob.make_public()
+    
     return blob.public_url
 
 
