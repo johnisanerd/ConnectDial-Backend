@@ -1,279 +1,221 @@
 """
-ConnectDial — Highlightly → ShortVideo Importer
-=================================================
-Optimized high-volume video importer engine.
+Management command: fetch_highlights
+=====================================
+Pulls sport highlights from the Highlightly API and saves them to the
+ShortVideo table. Designed to be run by a superadmin (cron / manual).
 """
 
+import json
 import logging
-import tempfile
-import os
-import urllib.request
-from dataclasses import dataclass, field
-from typing import Optional
+from datetime import date
 
-from django.contrib.auth import get_user_model
-from django.core.files.base import ContentFile
-from django.db import transaction
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
 
 logger = logging.getLogger(__name__)
 
-User = get_user_model()
 
+class Command(BaseCommand):
+    help = "Fetch sport highlights from Highlightly API and store them as ShortVideo records."
 
-@dataclass
-class ImportResult:
-    created:   int = 0
-    skipped:   int = 0
-    errors:    list = field(default_factory=list)
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--sport",
+            default=None,
+            help="Sport slug (football, basketball, cricket, etc.). "
+                 "Falls back to settings.HIGHLIGHTLY_SPORT or 'football'.",
+        )
+        parser.add_argument(
+            "--date",
+            default=None,
+            help="Date in YYYY-MM-DD format. Defaults to today.",
+        )
+        parser.add_argument(
+            "--league-name",
+            default=None,
+            dest="league_name",
+            help="Filter by league name (e.g. 'Premier League').",
+        )
+        parser.add_argument(
+            "--league-id",
+            default=None,
+            type=int,
+            dest="league_id",
+            help="Filter by Highlightly league ID.",
+        )
+        parser.add_argument(
+            "--country-code",
+            default=None,
+            dest="country_code",
+            help="ISO 3166 country code filter (e.g. 'GB', 'DE').",
+        )
+        parser.add_argument(
+            "--limit",
+            default=40,
+            type=int,
+            help="Max highlights to fetch per individual API call (max 40).",
+        )
+        parser.add_argument(
+            "--offset",
+            default=0,
+            type=int,
+            help="Initial pagination offset start point.",
+        )
+        parser.add_argument(
+            "--all-pages",
+            action="store_true",
+            dest="all_pages",
+            help="Auto-paginate through all available pages matching criteria until exhausted.",
+        )
+        parser.add_argument(
+            "--no-thumbnails",
+            action="store_true",
+            dest="no_thumbnails",
+            help="Skip thumbnail downloads (faster, less bandwidth).",
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            dest="dry_run",
+            help="Fetch from API and print results without saving to DB.",
+        )
+        parser.add_argument(
+            "--api-key",
+            default=None,
+            dest="api_key",
+            help="Override settings.HIGHLIGHTLY_API_KEY for this run.",
+        )
 
-    @property
-    def total_processed(self):
-        return self.created + self.skipped + len(self.errors)
+    def handle(self, *args, **options):
+        from short_videos.highlightly import (
+            HighlightlyClient,
+            import_highlights,
+            get_or_create_system_user,
+        )
+        from short_videos.models import ShortVideo
 
+        # ── Resolve API key ───────────────────────────────────────────────
+        api_key = (
+            options.get("api_key")
+            or getattr(settings, "HIGHLIGHTLY_API_KEY", None)
+        )
+        if not api_key:
+            raise CommandError(
+                "No Highlightly API key found. "
+                "Set HIGHLIGHTLY_API_KEY in settings or pass --api-key."
+            )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FIREBASE UPLOAD (Optimized: No slow programmatic ACL calls)
-# ─────────────────────────────────────────────────────────────────────────────
+        sport = (
+            options.get("sport")
+            or getattr(settings, "HIGHLIGHTLY_SPORT", "football")
+        )
 
-def _upload_to_firebase(local_path: str, destination_blob: str) -> str:
-    """Upload a local file to Firebase Storage and return its public URL."""
-    import firebase_admin
-    from firebase_admin import storage
-    from django.conf import settings
+        fetch_date = options.get("date") or str(date.today())
 
-    bucket_name = getattr(settings, "GS_BUCKET_NAME", "connect-c894b.firebasestorage.app")
-    bucket = storage.bucket(bucket_name)
-    blob = bucket.blob(destination_blob)
+        current_offset = options["offset"]
+        single_page_limit = min(options["limit"], 40)
+        auto_paginate = options["all_pages"]
 
-    blob.upload_from_filename(local_path, content_type="video/mp4")
-    return blob.public_url
+        total_created = 0
+        total_skipped = 0
+        total_errors = []
 
+        client = HighlightlyClient(api_key=api_key)
+        system_user = None if options["dry_run"] else get_or_create_system_user()
 
-def _upload_thumbnail_to_firebase(local_path: str, destination_blob: str) -> str:
-    """Upload a thumbnail image to Firebase Storage and return its public URL."""
-    import firebase_admin
-    from firebase_admin import storage
-    from django.conf import settings
+        self.stdout.write(self.style.MIGRATE_HEADING(
+            f"\n=== Highlightly Import Process Started ===\n"
+            f"  Sport       : {sport}\n"
+            f"  Date        : {fetch_date}\n"
+            f"  Base Limit  : {single_page_limit}\n"
+            f"  Auto-Page   : {auto_paginate}\n"
+            f"  Dry run     : {options['dry_run']}\n"
+        ))
 
-    bucket_name = getattr(settings, "GS_BUCKET_NAME", "connect-c894b.firebasestorage.app")
-    bucket = storage.bucket(bucket_name)
-    blob = bucket.blob(destination_blob)
+        max_loops = 100
+        loop_count = 0
 
-    blob.upload_from_filename(local_path, content_type="image/jpeg")
-    return blob.public_url
+        while True:
+            loop_count += 1
+            if loop_count > max_loops:
+                self.stdout.write(self.style.WARNING("Loop safeguard triggered. Exiting batching lifecycle."))
+                break
 
+            self.stdout.write(f" -> Fetching page at offset {current_offset}...")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DOWNLOAD HELPERS (Optimized with custom headers)
-# ─────────────────────────────────────────────────────────────────────────────
+            try:
+                highlights = client.get_highlights(
+                    sport=sport,
+                    date=fetch_date,
+                    league_id=options.get("league_id"),
+                    league_name=options.get("league_name"),
+                    country_code=options.get("country_code"),
+                    limit=single_page_limit,
+                    offset=current_offset,
+                )
+            except Exception as exc:
+                raise CommandError(f"Highlightly API error on offset {current_offset}: {exc}") from exc
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+            fetched_count = len(highlights)
+            self.stdout.write(f"    Fetched {fetched_count} records from API.")
 
+            if not highlights:
+                if loop_count == 1:
+                    self.stdout.write(self.style.WARNING("No highlights returned. Nothing to import."))
+                else:
+                    self.stdout.write("No more highlights found. Stream reached its tail end.")
+                break
 
-def _is_downloadable_url(url: str) -> bool:
-    if not url:
-        return False
-    skip = ("youtube.com", "youtu.be", "twitter.com", "x.com", "instagram.com")
-    return not any(s in url for s in skip)
+            if options["dry_run"]:
+                valid_highlights = [h for h in highlights if h.get("id")]
+                existing_captions = set()
+                if valid_highlights:
+                    existing_captions = set(
+                        ShortVideo.objects.filter(
+                            caption__regex=r"^\[highlightly:(" + "|".join(str(h.get('id')) for h in valid_highlights) + r")\]"
+                        ).values_list("caption", flat=True)
+                    )
 
+                self.stdout.write(self.style.SUCCESS(f"    [DRY RUN] Page evaluation visualization:"))
+                for h in highlights:
+                    highlight_id = h.get("id")
+                    if not highlight_id:
+                        continue
 
-def _download_video(url: str, timeout: int = 60) -> Optional[str]:
-    """Download a video URL to a temporary local file scratchpad."""
-    try:
-        # Pass headers explicitly to bypass Reddit/v.redd.it 403 barriers
-        req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-                tmp_path = tmp.name
-                chunk_size = 1024 * 512
-                while True:
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    tmp.write(chunk)
-        return tmp_path
-    except Exception as exc:
-        logger.warning("Video download failed (%s): %s", url, exc)
-        return None
+                    marker = f"[highlightly:{highlight_id}]"
+                    match = h.get("match", {}) or {}
+                    league = (match.get("league") or {}).get("name", "?")
+                    home   = (match.get("homeTeam") or {}).get("name", "?")
+                    away   = (match.get("awayTeam") or {}).get("name", "?")
 
-
-def _download_thumbnail(url: str, timeout: int = 15) -> Optional[str]:
-    try:
-        req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                tmp.write(resp.read())
-                return tmp.name
-    except Exception as exc:
-        logger.warning("Thumbnail download failed (%s): %s", url, exc)
-        return None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RESOLVERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _resolve_league(league_data: Optional[dict]):
-    if not league_data:
-        return None
-    try:
-        from leagues.models import League
-        return League.objects.filter(name__iexact=league_data.get("name", "")).first()
-    except Exception:
-        return None
-
-
-def _resolve_team(team_data: Optional[dict]):
-    if not team_data:
-        return None
-    try:
-        from leagues.models import Team
-        return Team.objects.filter(name__iexact=team_data.get("name", "")).first()
-    except Exception:
-        return None
-
-
-def _build_caption(highlight: dict) -> str:
-    parts = [highlight.get("title", "")]
-    desc = highlight.get("description", "")
-    if desc and desc.lower() != parts[0].lower():
-        parts.append(desc)
-    return "\n".join(p for p in parts if p).strip()[:2200]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN IMPORTER
-# ─────────────────────────────────────────────────────────────────────────────
-
-def import_highlights(
-    highlights: list[dict],
-    *,
-    system_user,
-    sport: str = "football",
-    fetch_thumbnails: bool = True,
-) -> ImportResult:
-    from ..models import ShortVideo
-
-    result = ImportResult()
-    if not highlights:
-        return result
-
-    valid_highlights = [h for h in highlights if h.get("id")]
-    if not valid_highlights:
-        return result
-
-    # Bulk duplicate isolation optimization
-    existing_captions = set(
-        ShortVideo.objects.filter(
-            caption__regex=r"^\[highlightly:(" + "|".join(str(h.get('id')) for h in valid_highlights) + r")\]"
-        ).values_list("caption", flat=True)
-    )
-
-    for h in valid_highlights:
-        highlight_id = h.get("id")
-        marker = f"[highlightly:{highlight_id}]"
-
-        if any(cap.startswith(marker) for cap in existing_captions):
-            result.skipped += 1
-            continue
-
-        video_url = h.get("url") or h.get("embedUrl") or ""
-        source = h.get("source", "").lower()
-
-        tmp_video_path = None
-        tmp_thumb_path = None
-        firebase_video_url = ""
-        firebase_thumb_url = ""
-
-        try:
-            # ── 1. Pipeline Stage A: Run Network Calls OUTSIDE DB Transactions ──
-            if _is_downloadable_url(video_url):
-                logger.info("Downloading highlight content [%s]...", highlight_id)
-                tmp_video_path = _download_video(video_url)
-
-                if tmp_video_path:
-                    firebase_video_blob = f"shorts/highlights/{highlight_id}.mp4"
-                    try:
-                        firebase_video_url = _upload_to_firebase(tmp_video_path, firebase_video_blob)
-                    except Exception as fb_exc:
-                        logger.warning("Firebase video push dropped for %s: %s", highlight_id, fb_exc)
-
-            if fetch_thumbnails and h.get("imgUrl"):
-                tmp_thumb_path = _download_thumbnail(h.get("imgUrl"))
-                if tmp_thumb_path:
-                    firebase_thumb_blob = f"shorts/highlights/thumbs/{highlight_id}.jpg"
-                    try:
-                        firebase_thumb_url = _upload_thumbnail_to_firebase(tmp_thumb_path, firebase_thumb_blob)
-                    except Exception as fb_exc:
-                        logger.warning("Firebase thumbnail push dropped for %s: %s", highlight_id, fb_exc)
-
-            # ── 2. Pipeline Stage B: Fast Database Persistence ──
-            with transaction.atomic():
-                match_data = h.get("match", {}) or {}
-                league = _resolve_league(match_data.get("league"))
-                team = _resolve_team(match_data.get("homeTeam"))
-                caption = marker + "\n" + _build_caption(h)
-
-                if firebase_video_url:
-                    caption += f"\nfirebase_url:{firebase_video_url}"
-                elif video_url:
-                    caption += f"\nexternal_url:{video_url}"
-
-                instance = ShortVideo(
-                    author=system_user,
-                    caption=caption,
-                    league=league,
-                    team=team,
-                    status="published",
+                    if any(cap.startswith(marker) for cap in existing_captions):
+                        self.stdout.write(f"      [SKIPPED] Already exists | id={highlight_id} | {home} vs {away}")
+                        total_skipped += 1
+                    else:
+                        self.stdout.write(f"      [WOULD IMPORT] id={highlight_id} | {home} vs {away} | {league}")
+                        total_created += 1
+            else:
+                result = import_highlights(
+                    highlights,
+                    system_user=system_user,
+                    sport=sport,
+                    fetch_thumbnails=not options["no_thumbnails"],
                 )
 
-                # Set file fields using paths matching our default storage layout
-                if firebase_video_url:
-                    instance.video.name = f"shorts/highlights/{highlight_id}.mp4"
-                if firebase_thumb_url:
-                    instance.thumbnail.name = f"shorts/highlights/thumbs/{highlight_id}.jpg"
-                else:
-                    # Secondary internal disk fallback fallback option if Firebase dropped
-                    if tmp_thumb_path:
-                        with open(tmp_thumb_path, "rb") as f:
-                            instance.thumbnail.save(
-                                f"highlightly_{highlight_id}.jpg",
-                                ContentFile(f.read()),
-                                save=False,
-                            )
+                total_created += result.created
+                total_skipped += result.skipped
+                if result.errors:
+                    total_errors.extend(result.errors)
 
-                instance.save()
-                result.created += 1
-                logger.info("Successfully indexed highlight %s", highlight_id)
+            if not auto_paginate or fetched_count < single_page_limit:
+                break
 
-        except Exception as exc:
-            logger.exception("Error processing highlight record row %s: %s", highlight_id, exc)
-            result.errors.append({"highlight_id": highlight_id, "error": str(exc)})
+            current_offset += single_page_limit
 
-        finally:
-            for path in (tmp_video_path, tmp_thumb_path):
-                if path and os.path.exists(path):
-                    try:
-                        os.unlink(path)
-                    except Exception:
-                        pass
-
-    return result
-
-
-def get_or_create_system_user():
-    username = "highlightly_bot"
-    user, created = User.objects.get_or_create(
-        username=username,
-        defaults={
-            "email": "bot@connectdial.internal",
-            "is_staff": False,
-            "is_active": True,
-        },
-    )
-    if created:
-        user.set_unusable_password()
-        user.save()
-    return user
+        action_verb = "Simulated" if options["dry_run"] else "Processed"
+        self.stdout.write(self.style.SUCCESS(
+            f"\n✓ Global Batch Execution Finalized:\n"
+            f"  Total {action_verb} Created : {total_created}\n"
+            f"  Total Duplicates Skipped: {total_skipped}\n"
+            f"  Total Validation Errors : {len(total_errors)}\n"
+        ))
