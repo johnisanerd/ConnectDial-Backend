@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   web:
     build: .
@@ -10,10 +8,14 @@ services:
     volumes:
       - .:/app
     ports:
-      - "127.0.0.1:8000:8000"  # Hidden from the public; only accessible by your host Nginx
-    command: gunicorn connectdial.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 600
+      - "127.0.0.1:8000:8000"
+    command: gunicorn connectdial.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2 --timeout 120
     depends_on:
       - redis
+    deploy:
+      resources:
+        limits:
+          memory: 700m
 
   celery_worker:
     build: .
@@ -23,9 +25,13 @@ services:
       - .env
     volumes:
       - .:/app
-    command: celery -A connectdial worker --loglevel=info
+    command: celery -A connectdial worker --loglevel=info --concurrency=2
     depends_on:
       - redis
+    deploy:
+      resources:
+        limits:
+          memory: 400m
 
   celery_beat:
     build: .
@@ -38,10 +44,18 @@ services:
     command: celery -A connectdial beat --loglevel=info
     depends_on:
       - redis
+    deploy:
+      resources:
+        limits:
+          memory: 200m
 
   redis:
     image: redis:7-alpine
     container_name: connectdial_redis
     restart: always
     ports:
-      - "127.0.0.1:6379:6379"  # Protected; locked down to localhost
+      - "127.0.0.1:6379:6379"
+    deploy:
+      resources:
+        limits:
+          memory: 200m
