@@ -80,6 +80,46 @@ def _author_dict(user, request):
     }
 
 
+def _extract_highlight_url(caption: str) -> str | None:
+    """
+    Extract the video URL embedded in a Highlightly-imported caption.
+
+    Caption format:
+        [highlightly:{id}]
+        {title}
+        {description}
+        firebase_url:{url}    ← preferred
+        external_url:{url}    ← fallback
+    """
+    if not caption or not caption.startswith('[highlightly:'):
+        return None
+    for line in caption.split('\n'):
+        if line.startswith('firebase_url:'):
+            return line[len('firebase_url:'):].strip()
+        if line.startswith('external_url:'):
+            return line[len('external_url:'):].strip()
+    return None
+
+
+def _clean_caption(caption: str) -> str:
+    """
+    Return a user-facing caption with the internal marker lines stripped out.
+    Removes the [highlightly:...] marker, firebase_url:, and external_url: lines.
+    """
+    if not caption:
+        return caption
+    lines = []
+    for line in caption.split('\n'):
+        if line.startswith('[highlightly:'):
+            continue
+        if line.startswith('firebase_url:'):
+            continue
+        if line.startswith('external_url:'):
+            continue
+        lines.append(line)
+    return '\n'.join(lines).strip()
+
+
 # ─────────────────────────────────────────────────────────────
 # SUPPORT MIXIN
 # ─────────────────────────────────────────────────────────────
@@ -286,6 +326,9 @@ class ShortVideoSerializer(
 
     is_liked = serializers.SerializerMethodField()
 
+    # Return clean caption without internal marker lines
+    caption = serializers.SerializerMethodField()
+
     class Meta:
         model = ShortVideo
 
@@ -318,7 +361,13 @@ class ShortVideoSerializer(
         return _author_dict(obj.author, request)
 
     def get_video_url(self, obj):
+        # ── Highlightly-imported video ────────────────────────────────────
+        # Check caption for firebase_url or external_url embedded by importer
+        highlight_url = _extract_highlight_url(obj.caption)
+        if highlight_url:
+            return highlight_url
 
+        # ── Normal locally uploaded video ─────────────────────────────────
         request = self.context.get('request')
 
         path = f"/api/videos/shorts/{obj.pk}/stream/"
@@ -354,6 +403,10 @@ class ShortVideoSerializer(
             ).exists()
 
         return False
+
+    def get_caption(self, obj):
+        """Return caption with internal Highlightly marker lines stripped."""
+        return _clean_caption(obj.caption)
 
     def get_league_details(self, obj):
 
@@ -393,14 +446,14 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
     video = serializers.FileField(
         required=False,
         allow_null=True,
-        allow_empty_file=True
+        allow_empty_file=False
     )
 
     file = serializers.FileField(
         required=False,
         write_only=True,
         allow_null=True,
-        allow_empty_file=True
+        allow_empty_file=False
     )
 
     class Meta:
@@ -416,10 +469,17 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
 
+        # Preserve original compatibility logic
         if 'file' in attrs and not attrs.get('video'):
             attrs['video'] = attrs.pop('file')
         else:
             attrs.pop('file', None)
+
+        # NEW: ensure at least one upload exists
+        if not attrs.get('video'):
+            raise serializers.ValidationError({
+                'video': 'A video file is required.'
+            })
 
         return attrs
 
@@ -433,6 +493,7 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
             or ''
         )
 
+        # Preserve original validation
         if (
             content_type and
             not content_type.startswith('video/')
@@ -441,6 +502,7 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
                 f"Invalid video type: {content_type}"
             )
 
+        # 2 GB limit preserved
         max_size_bytes = 2 * 1024 * 1024 * 1024
 
         if value.size > max_size_bytes:
@@ -448,9 +510,13 @@ class ShortVideoCreateSerializer(serializers.ModelSerializer):
                 "Video exceeds 2 GB limit."
             )
 
+        # NEW: prevent corrupted empty uploads
+        if value.size == 0:
+            raise serializers.ValidationError(
+                "Uploaded video is empty."
+            )
+
         return value
-
-
 # ─────────────────────────────────────────────────────────────
 # ENGAGEMENT
 # ─────────────────────────────────────────────────────────────

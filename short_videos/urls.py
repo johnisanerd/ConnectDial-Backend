@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from .admin_views import HighlightlyImportView
 
 urlpatterns = [
     # ── Feed ──────────────────────────────────────────────────────────────────
@@ -26,4 +27,14 @@ urlpatterns = [
     # ── Individual Comment Management ─────────────────────────────────────────
     path('comments/<uuid:pk>/', views.CommentDetailView.as_view(), name='comment-detail'),
     path('shorts/upload/', views.ShortVideoUploadView.as_view(), name='short-video-upload'),
+
+    # ── Superadmin: Highlightly Import ────────────────────────────────────────
+    # GET  → dry-run preview (no writes)
+    # POST → live import into ShortVideo table
+    # Requires: is_staff=True or is_superuser=True
+    path(
+        'admin/import-highlights/',
+        HighlightlyImportView.as_view(),
+        name='admin-import-highlights',
+    ),
 ]

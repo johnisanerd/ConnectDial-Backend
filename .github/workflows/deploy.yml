@@ -27,9 +27,9 @@ jobs:
           git pull origin main
           
           # Build images and restart containers gracefully
-          docker-compose down
-          docker-compose up --build -d
+          docker compose down
+          docker compose up --build -d
           
           # Execute remaining background database changes cleanly
-          docker-compose exec -T web python manage.py migrate
+          docker compose exec -T web python manage.py migrate
           

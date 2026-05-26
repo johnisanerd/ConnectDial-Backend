@@ -433,7 +433,9 @@ CELERY_BEAT_SCHEDULE = {
 GEMINI_API_KEY  = os.getenv('GEMINI_API_KEY')
 NEWS_API_KEY    = os.getenv('NEWS_API_KEY')
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
-
+# Correct:
+HIGHLIGHTLY_API_KEY = os.getenv("HIGHLIGHTLY_API_KEY")
+HIGHLIGHTLY_SPORT   = os.getenv("HIGHLIGHTLY_SPORT", default="football")
 # ======================
 # OTP SETTINGS
 # ======================
@@ -484,3 +486,10 @@ CACHES = {
         "KEY_PREFIX": "connectdial",
     }
 }
+DATA_UPLOAD_MAX_MEMORY_SIZE = 2147483648
+FILE_UPLOAD_MAX_MEMORY_SIZE = 52428800
+
+FILE_UPLOAD_HANDLERS = [
+    "django.core.files.uploadhandler.MemoryFileUploadHandler",
+    "django.core.files.uploadhandler.TemporaryFileUploadHandler",
+]

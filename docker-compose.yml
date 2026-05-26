@@ -1,61 +1,77 @@
+version: '3.8'
+
 services:
+
   web:
     build: .
     container_name: connectdial_web
     restart: always
+
     env_file:
       - .env
+
     volumes:
-      - .:/app
+      - media_data:/app/media
+      - static_data:/app/staticfiles
+
     ports:
       - "127.0.0.1:8000:8000"
-    command: gunicorn connectdial.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2 --timeout 120
+
+    command: >
+      gunicorn connectdial.wsgi:application
+      --bind 0.0.0.0:8000
+      --workers 4
+      --threads 4
+      --timeout 600
+
     depends_on:
       - redis
-    deploy:
-      resources:
-        limits:
-          memory: 700m
 
   celery_worker:
     build: .
     container_name: connectdial_worker
     restart: always
+
     env_file:
       - .env
+
     volumes:
-      - .:/app
-    command: celery -A connectdial worker --loglevel=info --concurrency=2
+      - media_data:/app/media
+      - static_data:/app/staticfiles
+
+    command: >
+      celery -A connectdial worker
+      --loglevel=info
+      --concurrency=2
+
     depends_on:
       - redis
-    deploy:
-      resources:
-        limits:
-          memory: 400m
 
   celery_beat:
     build: .
     container_name: connectdial_beat
     restart: always
+
     env_file:
       - .env
+
     volumes:
-      - .:/app
+      - media_data:/app/media
+      - static_data:/app/staticfiles
+
     command: celery -A connectdial beat --loglevel=info
+
     depends_on:
       - redis
-    deploy:
-      resources:
-        limits:
-          memory: 200m
 
   redis:
     image: redis:7-alpine
     container_name: connectdial_redis
     restart: always
+
     ports:
       - "127.0.0.1:6379:6379"
-    deploy:
-      resources:
-        limits:
-          memory: 200m
+
+volumes:
+  media_data:
+  static_data:
