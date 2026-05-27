@@ -76,7 +76,7 @@ logger = logging.getLogger(__name__)
 
 PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.connectmobile.app&pcampaignid=web_share"
 APP_SCHEME     = "connectdial"
-APP_DOMAIN     = "https://api.connectdial.com"
+APP_DOMAIN     = "https://api.dataforgeprism.com"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -766,7 +766,7 @@ class SharePostView(APIView):
 #
 # FLOW:
 #   1. User opens:
-#        https://api.connectdial.com/api/posts/share/post/123/
+#        https://api.dataforgeprism.com/api/posts/share/post/123/
 #
 #   2. Browser instantly attempts:
 #        connectdial://comments/123
