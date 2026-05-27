@@ -233,7 +233,9 @@ class VideoCommentSerializer(
 
     @extend_schema_field(OpenApiTypes.INT)
     def get_reply_count(self, obj):
-
+        # Use pre-annotated value when available (avoids COUNT query per comment)
+        if hasattr(obj, 'reply_count_annotation'):
+            return obj.reply_count_annotation
         return obj.replies.count()
 
 
@@ -394,14 +396,14 @@ class ShortVideoSerializer(
         return _build_url(request, obj.thumbnail)
 
     def get_is_liked(self, obj):
+        # Fast path: view pre-annotated this to avoid N+1 per-item DB hits
+        if hasattr(obj, '_is_liked'):
+            return obj._is_liked
 
+        # Fallback for single-object contexts (detail views, etc.)
         request = self.context.get('request')
-
         if request and request.user.is_authenticated:
-            return obj.likes.filter(
-                user=request.user
-            ).exists()
-
+            return obj.likes.filter(user=request.user).exists()
         return False
 
     def get_caption(self, obj):

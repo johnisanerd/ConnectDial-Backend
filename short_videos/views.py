@@ -288,86 +288,100 @@ class ShortVideoUploadView(generics.CreateAPIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ShortVideoPagination(LimitOffsetPagination):
-
-    default_limit = 10
-
-    max_limit = 20
+    default_limit = 20
+    max_limit     = 50
 
 
 class ShortVideoFeedView(ListAPIView):
+    """
+    GET /api/videos/shorts/feed/
+    Query params:
+      league_id  – filter to league (int / uuid)
+      team_id    – filter to team   (int / uuid)
+      limit      – page size (default 20, max 50)
+      offset     – pagination offset
+    """
 
-    authentication_classes = [
-        TokenAuthentication,
-        SessionAuthentication
-    ]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    permission_classes     = [IsAuthenticatedOrReadOnly]
+    serializer_class       = ShortVideoSerializer
+    pagination_class       = ShortVideoPagination
 
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    # ── Annotate liked status in one query so serializer avoids N+1 ──────────
+    def _annotate_liked(self, qs_or_list, user):
+        """
+        Attach an `_is_liked` boolean attribute to each ShortVideo object so
+        ShortVideoSerializer.get_is_liked() can read it without a per-item DB hit.
+        """
+        if not user or not user.is_authenticated:
+            for v in qs_or_list:
+                v._is_liked = False
+            return qs_or_list
 
-    serializer_class = ShortVideoSerializer
-
-    pagination_class = ShortVideoPagination
+        from .models import VideoLike
+        liked_ids = set(
+            VideoLike.objects
+            .filter(user=user, video__in=qs_or_list)
+            .values_list('video_id', flat=True)
+        )
+        for v in qs_or_list:
+            v._is_liked = v.pk in liked_ids
+        return qs_or_list
 
     def get_queryset(self):
         """
-        Fetches personalised ranked feeds using the scoring engine when
-        authenticated, falling back to chronological for guests.
-
-        Query params (both authenticated and guest):
-          league_id   – hard-filter to a specific league   (str / int)
-          team_id     – hard-filter to a specific team     (str / int)
-          ordering    – ignored here; score already sorts descending
+        Returns a plain list (from feed algorithm) or a QuerySet (guest path).
+        DRF pagination handles both via list().
         """
-
         user      = self.request.user
         league_id = self.request.query_params.get('league_id') or None
         team_id   = self.request.query_params.get('team_id')   or None
 
-        # ── Normalise: empty string → None ────────────────────────────────────
+        # Normalise empty strings
         if league_id == '':
             league_id = None
         if team_id == '':
             team_id = None
 
         if user and user.is_authenticated:
-
             from .feed_algorithm import get_short_video_feed
-
-            return get_short_video_feed(
+            result = get_short_video_feed(
                 user,
                 league_id=league_id,
                 team_id=team_id,
             )
+            return self._annotate_liked(result, user)
 
-        # ── Unauthenticated: simple chronological, still respects filters ─────
+        # Guest: simple chronological QuerySet
         qs = (
             ShortVideo.objects
             .filter(status='published')
-            .select_related(
-                'author',
-                'author__profile',
-                'league',
-                'team',
-            )
-            .prefetch_related(
-                'author__fan_preferences',
-                'author__fan_preferences__team',
-            )
+            .select_related('author', 'author__profile', 'league', 'team')
         )
-
         if league_id:
             qs = qs.filter(league_id=league_id)
-
         if team_id:
             qs = qs.filter(team_id=team_id)
 
-        return qs.order_by('-created_at')
+        result = list(qs.order_by('-created_at'))
+        return self._annotate_liked(result, user)
+
+    # DRF's ListAPIView.list() calls get_queryset() then paginate_queryset().
+    # paginate_queryset() works fine with plain lists.
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     def get_serializer_context(self):
-
         ctx = super().get_serializer_context()
-
         ctx['request'] = self.request
-
         return ctx
 
 
@@ -475,6 +489,28 @@ class VideoShareRecordView(APIView):
     authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticated]
 
+    @staticmethod
+    def _share_url(video) -> str:
+        """Absolute share URL — uses model property if available, else builds it."""
+        if hasattr(video, 'share_url') and video.share_url:
+            return video.share_url
+        return f"https://connectdial.app/shorts/{video.pk}/"
+
+    @staticmethod
+    def _og_title(video) -> str:
+        if hasattr(video, 'og_title') and video.og_title:
+            return video.og_title
+        author = getattr(video, 'author', None)
+        username = getattr(author, 'username', 'user') if author else 'user'
+        caption  = (video.caption or '')[:60]
+        return f"{caption} – @{username}" if caption else f"Video by @{username}"
+
+    @staticmethod
+    def _og_description(video) -> str:
+        if hasattr(video, 'og_description') and video.og_description:
+            return video.og_description
+        return (video.caption or '')[:160]
+
     def post(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
 
@@ -488,13 +524,17 @@ class VideoShareRecordView(APIView):
         ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') + 1)
         video.refresh_from_db(fields=['cached_shares'])
 
-        platform = share.platform
-        payload  = {
+        share_url   = self._share_url(video)
+        og_title    = self._og_title(video)
+        og_desc     = self._og_description(video)
+        platform    = share.platform
+
+        payload = {
             **serializer.data,
-            'shares_count':  video.cached_shares,
-            'share_url':     video.share_url,
-            'og_title':      video.og_title,
-            'og_description': video.og_description,
+            'shares_count':   video.cached_shares,
+            'share_url':      share_url,
+            'og_title':       og_title,
+            'og_description': og_desc,
             'thumbnail_url': (
                 request.build_absolute_uri(video.thumbnail.url)
                 if video.thumbnail else None
@@ -503,19 +543,19 @@ class VideoShareRecordView(APIView):
 
         if platform == 'whatsapp':
             text = build_whatsapp_share_text(video)
-            payload['text']          = text
-            payload['whatsapp_url']  = f"https://wa.me/?text={quote(text)}"
+            payload['text']         = text
+            payload['whatsapp_url'] = f"https://wa.me/?text={quote(text)}"
         elif platform == 'telegram':
             text = build_telegram_share_text(video)
-            payload['text']          = text
-            payload['telegram_url']  = (
-                f"https://t.me/share/url?url={quote(video.share_url)}"
-                f"&text={quote(video.og_title)}"
+            payload['text']         = text
+            payload['telegram_url'] = (
+                f"https://t.me/share/url?url={quote(share_url)}"
+                f"&text={quote(og_title)}"
             )
         elif platform == 'twitter':
             payload['twitter_url'] = (
                 f"https://twitter.com/intent/tweet"
-                f"?url={quote(video.share_url)}&text={quote(video.og_title)}"
+                f"?url={quote(share_url)}&text={quote(og_title)}"
             )
 
         return Response(payload, status=status.HTTP_201_CREATED)
