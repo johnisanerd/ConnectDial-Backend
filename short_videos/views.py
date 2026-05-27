@@ -309,33 +309,58 @@ class ShortVideoFeedView(ListAPIView):
 
     def get_queryset(self):
         """
-        Fetches personalized ranked feeds using your advanced ranking engine
-        when authenticated, falling back to a clean chronological list for guests.
+        Fetches personalised ranked feeds using the scoring engine when
+        authenticated, falling back to chronological for guests.
+
+        Query params (both authenticated and guest):
+          league_id   – hard-filter to a specific league   (str / int)
+          team_id     – hard-filter to a specific team     (str / int)
+          ordering    – ignored here; score already sorts descending
         """
 
-        user = self.request.user
+        user      = self.request.user
+        league_id = self.request.query_params.get('league_id') or None
+        team_id   = self.request.query_params.get('team_id')   or None
+
+        # ── Normalise: empty string → None ────────────────────────────────────
+        if league_id == '':
+            league_id = None
+        if team_id == '':
+            team_id = None
 
         if user and user.is_authenticated:
 
             from .feed_algorithm import get_short_video_feed
 
-            return get_short_video_feed(user)
+            return get_short_video_feed(
+                user,
+                league_id=league_id,
+                team_id=team_id,
+            )
 
-        return (
+        # ── Unauthenticated: simple chronological, still respects filters ─────
+        qs = (
             ShortVideo.objects
             .filter(status='published')
             .select_related(
                 'author',
                 'author__profile',
                 'league',
-                'team'
+                'team',
             )
             .prefetch_related(
                 'author__fan_preferences',
-                'author__fan_preferences__team'
+                'author__fan_preferences__team',
             )
-            .order_by('-created_at')
         )
+
+        if league_id:
+            qs = qs.filter(league_id=league_id)
+
+        if team_id:
+            qs = qs.filter(team_id=team_id)
+
+        return qs.order_by('-created_at')
 
     def get_serializer_context(self):
 
