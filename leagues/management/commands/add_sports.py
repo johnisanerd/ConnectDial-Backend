@@ -770,7 +770,14 @@ class Command(BaseCommand):
                     continue
 
                 # Create new team
-                team = Team.objects.create(name=team_name, league=league)
+                last_team = Team.objects.order_by('-id').first()
+                next_id = 1 if not last_team else last_team.id + 1
+
+                team = Team.objects.create(
+                    id=next_id,
+                    name=team_name,
+                    league=league
+                )
                 total_teams_created += 1
                 self.stdout.write(f'     + {team_name}')
 
