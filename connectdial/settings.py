@@ -15,9 +15,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
-# ✅ FIX: ALLOWED_HOSTS takes plain hostnames only — no http:// or https:// prefix.
-# Your original had 'http://16.16.95.218' and 'https://16.16.95.218' which Django
-# ignores / rejects, causing DisallowedHost errors in production.
+# ✅ UPDATED: Added your new domain api.dataforgeprism.com here.
 ALLOWED_HOSTS = [
     '192.168.100.107',
     'localhost',
@@ -27,18 +25,17 @@ ALLOWED_HOSTS = [
     '192.168.100.108',
     '10.199.198.201',
     '10.199.198.22',
-    'api.connectdial.com',
-    '16.16.95.218',          # plain IP — no scheme
+    'api.dataforgeprism.com',
+    '16.16.95.218',          
 ]
 
 AUTH_USER_MODEL = 'users.User'
 SITE_ID = 1
 
 # ✅ GOOGLE_CLIENT_ID — Web OAuth 2.0 Client ID from Google Cloud Console.
-# Must match webClientId in the React Native app's configureGoogleSignin().
 GOOGLE_CLIENT_ID         = os.getenv('GOOGLE_CLIENT_ID')
-GOOGLE_ANDROID_CLIENT_ID = os.getenv('GOOGLE_ANDROID_CLIENT_ID', '')  # optional
-GOOGLE_IOS_CLIENT_ID     = os.getenv('GOOGLE_IOS_CLIENT_ID', '')      # optional
+GOOGLE_ANDROID_CLIENT_ID = os.getenv('GOOGLE_ANDROID_CLIENT_ID', '')  
+GOOGLE_IOS_CLIENT_ID     = os.getenv('GOOGLE_IOS_CLIENT_ID', '')      
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -111,11 +108,10 @@ DATABASES = {
 # ======================
 # TEMPLATES
 # ======================
-
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates'],   # ← Recommended
+        'DIRS': [BASE_DIR / 'templates'],   
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -131,22 +127,6 @@ TEMPLATES = [
 # ======================
 # STATIC & MEDIA — Google Cloud Storage (Firebase Storage bucket)
 # ======================
-#
-# 'connect-c894b.firebasestorage.app' is a Firebase Storage bucket backed by GCS.
-# django-storages accesses it via the standard GCS JSON API using your service account.
-#
-# REQUIRED on your Firebase/GCS bucket for the service account:
-#   IAM role: roles/storage.objectAdmin  (Storage Object Admin)
-#
-# With GS_QUERYSTRING_AUTH = False (below), files must also be publicly readable.
-# In GCS Console → Bucket → Permissions → Add:
-#   Principal: allUsers
-#   Role:      Storage Object Viewer
-#
-# Public URL format:
-#   https://storage.googleapis.com/connect-c894b.firebasestorage.app/<filename>
-# ======================
-
 STATIC_URL  = 'static/'
 GS_BUCKET_NAME = 'connect-c894b.firebasestorage.app'
 GS_KEY_PATH    = os.path.join(BASE_DIR, 'firebase-service-account.json')
@@ -160,49 +140,40 @@ if os.path.exists(GS_KEY_PATH):
     }
 
     MEDIA_URL = f'https://storage.googleapis.com/{GS_BUCKET_NAME}/'
-
-    # ✅ FIX: Without this, every media URL is a signed URL that expires in ~1 hour.
-    # Profile images and any stored file will return 403 after expiry.
-    # Setting False makes URLs permanent public links (bucket must allow allUsers read).
     GS_QUERYSTRING_AUTH = False
-
-    # ✅ FIX: Without this, two uploads with the same filename silently overwrite each other.
-    # django-storages will append a unique suffix to avoid collisions.
     GS_FILE_OVERWRITE = False
-
-    # ✅ Cache-Control so browsers and CDNs cache media files for 24h
     GS_OBJECT_PARAMETERS = {
         'cache_control': 'public, max-age=86400',
     }
-
 else:
-    # Fallback: local filesystem (no firebase-service-account.json present)
     MEDIA_URL  = '/media/'
     MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
-# GCS connection tuning
 GS_DEFAULT_TIMEOUT    = 300
 GS_CONNECTION_TIMEOUT = 300
-GS_BLOB_CHUNK_SIZE    = 1024 * 1024 * 16  # 16 MB chunks
+GS_BLOB_CHUNK_SIZE    = 1024 * 1024 * 16  
+
 # ======================
 # CORS
 # ======================
+# ✅ UPDATED: Pointed origins to your new domain names.
 CORS_ALLOWED_ORIGINS = [
     'http://16.16.95.218',
     'https://16.16.95.218',
-    'http://api.connectdial.com',
-    'https://api.connectdial.com',
+    'http://api.dataforgeprism.com',
+    'https://api.dataforgeprism.com',
 ]
 CORS_ALLOW_CREDENTIALS = True
 
 # ======================
 # CSRF
 # ======================
+# ✅ UPDATED: Pointed trusted origins to your new domain names.
 CSRF_TRUSTED_ORIGINS = [
     'http://16.16.95.218',
     'https://16.16.95.218',
-    'http://api.connectdial.com',
-    'https://api.connectdial.com',
+    'http://api.dataforgeprism.com',
+    'https://api.dataforgeprism.com',
 ]
 
 # ======================
@@ -215,9 +186,8 @@ AUTHENTICATION_BACKENDS = [
 
 # ======================
 # ALLAUTH — headless / API mode
-# GoogleSignInView verifies id_tokens directly — no OAuth redirect used.
 # ======================
-ACCOUNT_EMAIL_VERIFICATION    = 'none'    # OTP-based verification handled manually
+ACCOUNT_EMAIL_VERIFICATION    = 'none'    
 ACCOUNT_EMAIL_REQUIRED        = True
 ACCOUNT_UNIQUE_EMAIL          = True
 ACCOUNT_USERNAME_REQUIRED     = False
@@ -227,8 +197,6 @@ SOCIALACCOUNT_AUTO_SIGNUP                       = True
 SOCIALACCOUNT_EMAIL_REQUIRED                    = False
 SOCIALACCOUNT_EMAIL_AUTHENTICATION              = True
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
-# ✅ FIX: SOCIALACCOUNT_LOGIN_ON_GET = True removed — it's a CSRF security risk
-# that allows GET requests to complete social login without a CSRF token.
 
 SOCIALACCOUNT_PROVIDERS = {
     'google': {
@@ -306,7 +274,6 @@ DEFAULT_FROM_EMAIL  = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@connectdial.
 # ======================
 # CELERY
 # ======================
-# Change from: 'redis://localhost:6379/0'
 CELERY_BROKER_URL     = os.environ.get('CELERY_BROKER', 'redis://redis:6379/0')
 CELERY_RESULT_BACKEND = os.environ.get('CELERY_BROKER', 'redis://redis:6379/0')
 CELERY_TIMEZONE       = 'UTC'
@@ -318,7 +285,7 @@ CELERY_BEAT_SCHEDULE = {
     },
     'check-unread-every-2-minutes': {
         'task': 'notifications.tasks.check_unread_notifications_periodic',
-        'schedule': 120.0,  # Time in seconds (2 minutes)
+        'schedule': 120.0,  
     },
     'bot-social-expansion': {
         'task':     'posts.tasks.expand_bot_social_graph',
@@ -433,9 +400,9 @@ CELERY_BEAT_SCHEDULE = {
 GEMINI_API_KEY  = os.getenv('GEMINI_API_KEY')
 NEWS_API_KEY    = os.getenv('NEWS_API_KEY')
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
-# Correct:
 HIGHLIGHTLY_API_KEY = os.getenv("HIGHLIGHTLY_API_KEY")
 HIGHLIGHTLY_SPORT   = os.getenv("HIGHLIGHTLY_SPORT", default="football")
+
 # ======================
 # OTP SETTINGS
 # ======================
@@ -456,27 +423,11 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 APP_NAME = 'ConnectDial'
 
 # ======================
-# CACHES — Redis (Step 6 / required by feed_algorithm.py)
+# CACHES — Redis
 # ======================
-#
-# feed_algorithm.py uses Django's cache framework to store personalised video
-# rankings. Without this block Django falls back to LocMemCache, which:
-#   • resets on every gunicorn worker restart
-#   • is NOT shared across worker processes (each worker has its own copy)
-#
-# Redis DB 1 is used here so it doesn't collide with Celery (DB 0 above).
-#
-# INSTALL:
-#   pip install django-redis
-#
-# START / VERIFY REDIS (Ubuntu):
-#   sudo service redis-server start
-#   redis-cli ping   # → PONG
-#
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        # Change from: "redis://127.0.0.1:6379/1"
         "LOCATION": "redis://redis:6379/1",
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
