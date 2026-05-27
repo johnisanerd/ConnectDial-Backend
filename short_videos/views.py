@@ -587,22 +587,55 @@ class VideoReshareView(APIView):
 
 class VideoCommentListCreateView(APIView):
     """
-    GET  /api/videos/shorts/<pk>/comments/ -> Fetch optimized top-level comments
-    POST /api/videos/shorts/<pk>/comments/ -> Post clean comment
+    GET  /api/videos/shorts/<pk>/comments/
+    POST /api/videos/shorts/<pk>/comments/
     """
     authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticatedOrReadOnly]
 
+    def _annotate_comment_likes(self, comments, user):
+        """
+        Attach _is_liked to each comment in one query (avoids N+1).
+        Also sets _likes_count from the pre-fetched reverse relation.
+        """
+        if not user or not user.is_authenticated:
+            for c in comments:
+                c._is_liked = False
+                c._likes_count = 0
+            return comments
+
+        from .models import VideoCommentLike
+        liked_ids = set(
+            VideoCommentLike.objects
+            .filter(user=user, comment__in=comments)
+            .values_list('comment_id', flat=True)
+        )
+        for c in comments:
+            c._is_liked = c.pk in liked_ids
+            c._likes_count = getattr(c, 'cached_likes', 0)
+        return comments
+
     def get(self, request, pk):
         video = get_object_or_404(ShortVideo, pk=pk)
-        
-        qs = (
+
+        qs = list(
             VideoComment.objects
             .filter(video=video, parent__isnull=True)
-            .select_related('author', 'author__profile', 'video__league')
-            .prefetch_related('author__fan_preferences', 'author__fan_preferences__team', 'replies')
+            .select_related(
+                'author',
+                'author__profile',
+                'video',
+                'video__league',
+            )
+            .prefetch_related(
+                'author__fan_preferences',
+                'author__fan_preferences__team',
+                'replies',
+            )
             .order_by('-created_at')
         )
+
+        self._annotate_comment_likes(qs, request.user)
 
         serializer = VideoCommentSerializer(qs, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -620,32 +653,64 @@ class VideoCommentListCreateView(APIView):
         comment = serializer.save(author=request.user, video=video)
         ShortVideo.objects.filter(pk=pk).update(cached_comments=F('cached_comments') + 1)
 
+        # Re-fetch with related data so the response has full author/supporting_info
+        comment = (
+            VideoComment.objects
+            .select_related('author', 'author__profile', 'video', 'video__league')
+            .prefetch_related('author__fan_preferences', 'author__fan_preferences__team')
+            .get(pk=comment.pk)
+        )
+        comment._is_liked    = False
+        comment._likes_count = 0
+
         return Response(
             VideoCommentSerializer(comment, context={'request': request}).data,
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_201_CREATED,
         )
 
 
 class CommentRepliesListView(ListAPIView):
     """
-    GET /api/videos/shorts/<pk>/comments/<comment_pk>/replies/ -> Optimized sub-threads
+    GET /api/videos/shorts/<pk>/comments/<comment_pk>/replies/
     """
     authentication_classes = [TokenAuthentication, SessionAuthentication]
-    permission_classes     = [IsAuthenticatedOrReadOnly] 
+    permission_classes     = [IsAuthenticatedOrReadOnly]
     serializer_class       = VideoCommentSerializer
 
     def get_queryset(self):
-        return (
+        return list(
             VideoComment.objects
             .filter(
                 video_id=self.kwargs['pk'],
                 parent_id=self.kwargs['comment_pk'],
             )
-            .select_related('author', 'author__profile', 'video__league')
+            .select_related('author', 'author__profile', 'video', 'video__league')
             .prefetch_related('author__fan_preferences', 'author__fan_preferences__team')
             .order_by('created_at')
         )
-        
+
+    def list(self, request, *args, **kwargs):
+        qs = self.get_queryset()
+
+        # Annotate like status in one query
+        if request.user.is_authenticated:
+            from .models import VideoCommentLike
+            liked_ids = set(
+                VideoCommentLike.objects
+                .filter(user=request.user, comment__in=qs)
+                .values_list('comment_id', flat=True)
+            )
+            for c in qs:
+                c._is_liked    = c.pk in liked_ids
+                c._likes_count = getattr(c, 'cached_likes', 0)
+        else:
+            for c in qs:
+                c._is_liked    = False
+                c._likes_count = 0
+
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         ctx['request'] = self.request
@@ -654,8 +719,8 @@ class CommentRepliesListView(ListAPIView):
 
 class CommentDetailView(APIView):
     """
-    PATCH  /api/videos/comments/<pk>/ -> Safe patch comment edits
-    DELETE /api/videos/comments/<pk>/ -> Atomic removal
+    PATCH  /api/videos/comments/<pk>/
+    DELETE /api/videos/comments/<pk>/
     """
     authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes     = [IsAuthenticated]
@@ -664,7 +729,7 @@ class CommentDetailView(APIView):
         comment = get_object_or_404(VideoComment, pk=pk)
         if comment.author_id != request.user.id:
             from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("You do not own modification privileges on this resource.")
+            raise PermissionDenied('You do not own this comment.')
         return comment
 
     def patch(self, request, pk):
@@ -673,24 +738,61 @@ class CommentDetailView(APIView):
         data.pop('video', None)
 
         serializer = VideoCommentCreateSerializer(
-            comment,
-            data=data,
-            partial=True,
-            context={'request': request}
+            comment, data=data, partial=True, context={'request': request}
         )
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
+
         updated = serializer.save(is_edited=True)
+        updated._is_liked    = False
+        updated._likes_count = 0
         return Response(
             VideoCommentSerializer(updated, context={'request': request}).data,
-            status=status.HTTP_200_OK
+            status=status.HTTP_200_OK,
         )
 
     def delete(self, request, pk):
         comment = self._get_own_comment(request, pk)
         video_pk = comment.video_id
-        
         comment.delete()
         ShortVideo.objects.filter(pk=video_pk).update(cached_comments=F('cached_comments') - 1)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class VideoCommentLikeToggleView(APIView):
+    """
+    POST /api/videos/comments/<pk>/like/
+    Toggles a like on a comment. Returns { liked: bool, likes_count: int }.
+    """
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    permission_classes     = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from .models import VideoCommentLike
+
+        comment = get_object_or_404(VideoComment, pk=pk)
+        existing = VideoCommentLike.objects.filter(
+            user=request.user, comment=comment
+        ).first()
+
+        if existing:
+            existing.delete()
+            # Decrement cached counter safely
+            VideoComment.objects.filter(pk=pk).update(
+                cached_likes=F('cached_likes') - 1
+            )
+            comment.refresh_from_db(fields=['cached_likes'])
+            return Response(
+                {'liked': False, 'likes_count': max(comment.cached_likes, 0)},
+                status=status.HTTP_200_OK,
+            )
+
+        VideoCommentLike.objects.create(user=request.user, comment=comment)
+        VideoComment.objects.filter(pk=pk).update(
+            cached_likes=F('cached_likes') + 1
+        )
+        comment.refresh_from_db(fields=['cached_likes'])
+        return Response(
+            {'liked': True, 'likes_count': comment.cached_likes},
+            status=status.HTTP_201_CREATED,
+        )

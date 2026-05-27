@@ -204,9 +204,11 @@ class VideoCommentSerializer(
     serializers.ModelSerializer
 ):
 
-    author_details = serializers.SerializerMethodField()
+    author_details  = serializers.SerializerMethodField()
     supporting_info = serializers.SerializerMethodField()
-    reply_count = serializers.SerializerMethodField()
+    reply_count     = serializers.SerializerMethodField()
+    is_liked        = serializers.SerializerMethodField()
+    likes_count     = serializers.SerializerMethodField()
 
     class Meta:
         model = VideoComment
@@ -219,6 +221,8 @@ class VideoCommentSerializer(
             'author_details',
             'supporting_info',
             'reply_count',
+            'is_liked',
+            'likes_count',
             'created_at',
             'updated_at',
             'is_edited',
@@ -226,17 +230,35 @@ class VideoCommentSerializer(
 
     @extend_schema_field(OpenApiTypes.OBJECT)
     def get_author_details(self, obj):
-
         request = self.context.get('request')
-
         return _author_dict(obj.author, request)
 
     @extend_schema_field(OpenApiTypes.INT)
     def get_reply_count(self, obj):
-        # Use pre-annotated value when available (avoids COUNT query per comment)
         if hasattr(obj, 'reply_count_annotation'):
             return obj.reply_count_annotation
         return obj.replies.count()
+
+    @extend_schema_field(OpenApiTypes.BOOL)
+    def get_is_liked(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        # Use pre-annotated value when set by the view to avoid N+1
+        if hasattr(obj, '_is_liked'):
+            return obj._is_liked
+        from .models import VideoCommentLike
+        return VideoCommentLike.objects.filter(
+            user=request.user, comment=obj
+        ).exists()
+
+    @extend_schema_field(OpenApiTypes.INT)
+    def get_likes_count(self, obj):
+        if hasattr(obj, 'likes_count_annotation'):
+            return obj.likes_count_annotation
+        if hasattr(obj, 'cached_likes'):
+            return obj.cached_likes
+        return getattr(obj, '_likes_count', 0)
 
 
 class VideoCommentCreateSerializer(serializers.ModelSerializer):

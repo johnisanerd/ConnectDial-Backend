@@ -214,6 +214,9 @@ class VideoComment(models.Model):
 
     is_edited = models.BooleanField(default=False)
 
+    # Cached counter updated by VideoCommentLikeToggleView — avoids COUNT queries
+    cached_likes = models.PositiveIntegerField(default=0)
+
     class Meta:
         ordering = ['created_at']
 
@@ -249,6 +252,30 @@ class CommentMention(models.Model):
 
     class Meta:
         unique_together = ('comment', 'user')
+
+
+# ─────────────────────────────────────────────────────────────
+# VIDEO COMMENT LIKE
+# ─────────────────────────────────────────────────────────────
+
+class VideoCommentLike(models.Model):
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='comment_likes',
+    )
+
+    comment = models.ForeignKey(
+        VideoComment,
+        on_delete=models.CASCADE,
+        related_name='likes',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'comment')
 
 
 # ─────────────────────────────────────────────────────────────
