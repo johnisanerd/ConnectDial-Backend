@@ -24,6 +24,7 @@ Run:
   python manage.py bot_post --source newsapi "Champions League"
 """
 
+import os
 import random
 import requests
 import hashlib
@@ -37,12 +38,15 @@ from leagues.models import League, Team
 
 User = get_user_model()
 
-# ─── API KEYS ────────────────────────────────────────────────────────────────
-NEWS_API_KEY          = "b6c80809d3904036baa2e07657c02831"
-RAPID_API_KEY         = "YOUR_RAPIDAPI_KEY_HERE"          # api-football via rapidapi
-FOOTBALL_DATA_API_KEY = "YOUR_FOOTBALL_DATA_ORG_KEY"      # football-data.org (free tier)
-PIXABAY_API_KEY       = "YOUR_PIXABAY_KEY_HERE"           # pixabay.com – fallback images
-PEXELS_API_KEY        = "HNdRlaon0CTc9qoCrFUYUNrnrHV6wpyetmhozjBUhpZ9tnVPPvZIBWO5"
+# ─── API KEYS (read from environment — never commit live keys) ───────────────
+# Set these in your shell / .env / deployment config, e.g.:
+#   export NEWS_API_KEY=...   export RAPID_API_KEY=...   export PEXELS_API_KEY=...
+# Until RAPID_API_KEY / FOOTBALL_DATA_API_KEY are set, posts use offline content.
+NEWS_API_KEY          = os.environ.get("NEWS_API_KEY", "")
+RAPID_API_KEY         = os.environ.get("RAPID_API_KEY", "YOUR_RAPIDAPI_KEY_HERE")
+FOOTBALL_DATA_API_KEY = os.environ.get("FOOTBALL_DATA_API_KEY", "YOUR_FOOTBALL_DATA_ORG_KEY")
+PIXABAY_API_KEY       = os.environ.get("PIXABAY_API_KEY", "YOUR_PIXABAY_KEY_HERE")
+PEXELS_API_KEY        = os.environ.get("PEXELS_API_KEY", "")
 
 # ─── LEAGUE CONFIG ───────────────────────────────────────────────────────────
 LEAGUE_CONFIG = {
@@ -421,9 +425,35 @@ class Command(BaseCommand):
         return None
 
     # ── OFFLINE TEMPLATE ─────────────────────────────────────────────────────
-    def offline_template(self, league_name, bot_type="fan"):
-        pool  = OFFLINE_TEMPLATES.get(league_name.lower(), OFFLINE_TEMPLATES["generic"])
-        text  = random.choice(pool)
+    # Combinatorial fragments give thousands of unique captions even with APIs off.
+    _OPENERS = [
+        "Hot take:", "Real talk —", "Say it louder:", "Stat of the day:",
+        "Matchday mood:", "Calling it now —", "This needs saying:", "Quietly brilliant:",
+    ]
+    _TAKES = [
+        "{subject} have been the story of the {league} season and it's not close.",
+        "the form {subject} are in right now is genuinely special to watch.",
+        "you can't talk about {league} this season without mentioning {subject}.",
+        "{subject} are doing the unglamorous things brilliantly — and it's working.",
+        "{subject} on their day can beat anyone in {league}. Anyone.",
+        "watching {subject} is a reminder of why we fell for this sport.",
+    ]
+    _CTAS = ["Who's with me? 👇", "Tell me I'm wrong. 😤", "Drop your take below. 💬",
+             "Agree or disagree? 👀", ""]
+
+    def offline_template(self, league_name, bot_type="fan", subject=None):
+        subject = subject or league_name
+        # 50/50 between a curated static line and a freshly assembled one
+        if random.random() < 0.5:
+            text = random.choice(OFFLINE_TEMPLATES.get(
+                league_name.lower(), OFFLINE_TEMPLATES["generic"]))
+        else:
+            opener = random.choice(self._OPENERS)
+            take   = random.choice(self._TAKES).format(subject=subject, league=league_name)
+            cta    = random.choice(self._CTAS)
+            text   = f"{opener} {take}" + (f" {cta}" if cta else "")
+            tag    = league_name.replace(" ", "")
+            text   = f"{text} #{tag} #ConnectDial"
         # Apply persona styling
         styler = PERSONA_STYLES.get(bot_type, PERSONA_STYLES["fan"])
         return styler(text)
@@ -491,7 +521,7 @@ class Command(BaseCommand):
                 source_label = "football-data.org"
                 self.stdout.write(self.style.SUCCESS("  ✅ football-data.org data"))
 
-        if not content and source_pref in ('auto', 'newsapi'):
+        if not content and source_pref in ('auto', 'newsapi') and NEWS_API_KEY:
             self.stdout.write(f"  📰 Falling back to NewsAPI...")
             content, image_url = self.fetch_newsapi(league.name)
             if content:
@@ -500,7 +530,15 @@ class Command(BaseCommand):
 
         if not content:
             self.stdout.write(f"  📋 Using season-accurate offline template...")
-            content = self.offline_template(league.name, bot_type)
+            fav_team = getattr(bot, 'favorite_team', None)
+            subj = fav_team.name if fav_team else league.name
+            # Re-roll up to 12 times so this bot doesn't repeat a caption this week
+            content = self.offline_template(league.name, bot_type, subject=subj)
+            for _ in range(12):
+                content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
+                if not self._already_posted_this_week(bot, content_hash):
+                    break
+                content = self.offline_template(league.name, bot_type, subject=subj)
             source_label = "Template"
 
         if dry_run:
