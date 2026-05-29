@@ -9,8 +9,8 @@ app = Celery('connectdial')
 app.config_from_object('django.conf:settings', namespace='CELERY')
 
 # This is the standard way to find tasks.py in every app
-app.autodiscover_tasks()
+#app.autodiscover_tasks()
 
 # 🚀 ADD THIS TO FORCE DISCOVERY IF AUTODISCOVER FAILS
-# app.autodiscover_tasks(['notifications', 'posts'])
+app.autodiscover_tasks(['notifications',])
 # connectdial/celery.py
