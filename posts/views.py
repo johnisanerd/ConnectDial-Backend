@@ -38,7 +38,7 @@ from django.views import View
 
 from rest_framework import filters, generics, permissions, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.pagination import CursorPagination
+from rest_framework.pagination import CursorPagination, LimitOffsetPagination
 from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -171,7 +171,14 @@ def _extract_media_files(request):
 # ─────────────────────────────────────────────────────────────────────
 class PostViewSet(viewsets.ModelViewSet):
     serializer_class = PostSerializer
-    pagination_class = FeedCursorPagination
+    # ✅ FIX: was FeedCursorPagination (CursorPagination).
+    # CursorPagination ignores ?limit=10&offset=N entirely — it only reads
+    # an opaque ?cursor= token. The frontend never sends a cursor, so every
+    # request returned the same first page, driving an infinite fetch loop.
+    # LimitOffsetPagination matches the ?limit=10&offset=N params the
+    # frontend already sends and returns a `count` field so getNextPageParam
+    # can reliably detect the last page.
+    pagination_class = LimitOffsetPagination
     filter_backends = [filters.SearchFilter]
     search_fields = ['content', 'author__username', 'league__name']
     parser_classes = [MultiPartParser, FormParser, JSONParser]

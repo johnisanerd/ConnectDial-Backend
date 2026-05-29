@@ -12,5 +12,5 @@ app.config_from_object('django.conf:settings', namespace='CELERY')
 #app.autodiscover_tasks()
 
 # 🚀 ADD THIS TO FORCE DISCOVERY IF AUTODISCOVER FAILS
-app.autodiscover_tasks(['notifications','posts','short_videos','users'])
+app.autodiscover_tasks(['notifications'])
 # connectdial/celery.py
