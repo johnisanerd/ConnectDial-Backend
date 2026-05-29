@@ -9,8 +9,8 @@ Data sources (priority cascade):
   5. Offline templates — always works, high variety
 
 Key fixes vs previous version:
-  ✅ IMAGES   — never uses urlToImage; fetches Pexels by league/team keyword
-  ✅ DEDUP    — global pool: different Pexels photo per bot per run
+  ✅ IMAGES   — Apify Google Images, content-matched per post
+  ✅ DEDUP    — Apify image query built from post content
   ✅ CONTENT  — Apify queries "{league} news/football" so results are on-topic
   ✅ SPAM     — casino/betting/listicle/net-worth junk filtered before posting
   ✅ RECENCY  — only articles ≤ 2 days old
@@ -42,9 +42,8 @@ User = get_user_model()
 # ─── API KEYS — set via environment variables, never hardcode ────────────────
 RAPID_API_KEY         = os.environ.get("RAPID_API_KEY", "")
 FOOTBALL_DATA_API_KEY = os.environ.get("FOOTBALL_DATA_API_KEY", "")
-APIFY_TOKEN           = os.environ.get("APIFY_TOKEN", "")          # apify.com token
+APIFY_TOKEN           = os.environ.get("APIFY_TOKEN", "")
 NEWS_API_KEY          = os.environ.get("NEWS_API_KEY", "")
-PEXELS_API_KEY        = os.environ.get("PEXELS_API_KEY", "")
 
 # ─── QUALITY CONTROLS ────────────────────────────────────────────────────────
 NEWS_MAX_AGE_DAYS = 2        # reject articles older than this
@@ -70,61 +69,51 @@ LEAGUE_CONFIG = {
         "api_id": 39,  "fd_code": "PL",  "emoji": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
         "season": 2025, "hashtags": ["PremierLeague", "EPL", "PL"],
         "apify_query": "Premier League football 2026",
-        "pexels_img":  "premier league football match stadium",
     },
     "la liga":          {
         "api_id": 140, "fd_code": "PD",  "emoji": "🇪🇸",
         "season": 2025, "hashtags": ["LaLiga", "PrimeraDivision"],
         "apify_query": "La Liga Barcelona Real Madrid 2026",
-        "pexels_img":  "la liga football spain stadium",
     },
     "serie a":          {
         "api_id": 135, "fd_code": "SA",  "emoji": "🇮🇹",
         "season": 2025, "hashtags": ["SerieA", "calcio"],
         "apify_query": "Serie A Italian football 2026",
-        "pexels_img":  "serie a football italy stadium",
     },
     "bundesliga":       {
         "api_id": 78,  "fd_code": "BL1", "emoji": "🇩🇪",
         "season": 2025, "hashtags": ["Bundesliga"],
         "apify_query": "Bundesliga German football 2026",
-        "pexels_img":  "bundesliga football germany crowd",
     },
     "ligue 1":          {
         "api_id": 61,  "fd_code": "FL1", "emoji": "🇫🇷",
         "season": 2025, "hashtags": ["Ligue1", "FrenchFootball"],
         "apify_query": "Ligue 1 French football PSG 2026",
-        "pexels_img":  "french football ligue 1 stadium",
     },
     "champions league": {
         "api_id": 2,   "fd_code": "CL",  "emoji": "⭐",
         "season": 2025, "hashtags": ["UCL", "ChampionsLeague"],
         "apify_query": "UEFA Champions League 2026 final",
-        "pexels_img":  "champions league football night stadium",
     },
     "saudi pro league": {
         "api_id": 307, "fd_code": None,  "emoji": "🇸🇦",
         "season": 2025, "hashtags": ["SPL", "SaudiProLeague", "RoshnLeague"],
         "apify_query": "Saudi Pro League Roshn football 2026",
-        "pexels_img":  "saudi arabia football stadium crowd",
     },
     "nba":              {
         "api_id": None,"fd_code": None,  "emoji": "🏀",
         "season": 2025, "hashtags": ["NBA", "Basketball"],
         "apify_query": "NBA basketball playoffs 2026",
-        "pexels_img":  "NBA basketball arena crowd dunk",
     },
     "mls":              {
         "api_id": 253, "fd_code": None,  "emoji": "🇺🇸",
         "season": 2026, "hashtags": ["MLS", "MLSSoccer"],
         "apify_query": "MLS Major League Soccer World Cup 2026",
-        "pexels_img":  "MLS soccer usa stadium crowd",
     },
     "fifa world cup":   {
         "api_id": 1,   "fd_code": "WC",  "emoji": "🏆",
         "season": 2026, "hashtags": ["FIFAWorldCup2026", "WorldCup2026", "WC2026"],
         "apify_query": "FIFA World Cup 2026 squad news",
-        "pexels_img":  "world cup football trophy crowd stadium",
     },
 }
 
@@ -251,12 +240,9 @@ _NEWS_WRAPPERS = [
 
 
 class Command(BaseCommand):
-    help = "Posts world-class sports content using Apify news + Pexels images"
+    help = "Posts world-class sports content using Apify for news and images"
 
-    # Class-level image pool — shared across league calls in one orchestra run
-    # Maps league_name → list of Pexels photo dicts
-    _pexels_pool: dict = {}
-    _used_photo_ids: set = set()
+    # Class-level image dedup — track Apify images used this run
     _used_wrappers: list = []    # track wrapper indices used this run
 
     def add_arguments(self, parser):
@@ -318,41 +304,7 @@ class Command(BaseCommand):
             return True
         return any(tn.lower() in blob for tn in team_names if len(tn) > 3)
 
-    # ─── IMAGE: Pexels pool (unique photo per bot, never article image) ───────
-    def _load_pexels_pool(self, league_name):
-        """Fetch a pool of 20 sports photos for this league into memory."""
-        if league_name in self._pexels_pool:
-            return
-        cfg = LEAGUE_CONFIG.get(league_name.lower(), {})
-        query = cfg.get("pexels_img", f"{league_name} sports stadium")
-        try:
-            r = requests.get(
-                "https://api.pexels.com/v1/search",
-                params={"query": query, "per_page": 20, "orientation": "landscape"},
-                headers={"Authorization": PEXELS_API_KEY},
-                timeout=8,
-            ).json()
-            self._pexels_pool[league_name] = r.get("photos", [])
-        except Exception:
-            self._pexels_pool[league_name] = []
-
-    def _get_unique_photo_url(self, league_name):
-        """Return a Pexels photo URL not yet used this run."""
-        self._load_pexels_pool(league_name)
-        pool = self._pexels_pool.get(league_name, [])
-        for photo in pool:
-            pid = photo.get("id")
-            if pid and pid not in self._used_photo_ids:
-                self._used_photo_ids.add(pid)
-                return photo.get("src", {}).get("large2x") or photo.get("src", {}).get("large")
-        # All used — clear and start over
-        self._used_photo_ids.clear()
-        if pool:
-            photo = pool[0]
-            self._used_photo_ids.add(photo.get("id"))
-            return photo.get("src", {}).get("large")
-        return None
-
+    # ─── IMAGE: Apify Google Images (content-matched, never article urlToImage) ──
     def _fetch_image_apify(self, search_query):
         """
         Fetch a content-matched image via Apify Google Images Scraper.
@@ -396,28 +348,35 @@ class Command(BaseCommand):
 
     def _build_image_query(self, content, source_label, league_name, team_name=None):
         """
-        Derive a specific image search query from the post content.
-        Apify Google Images will then return a photo that actually matches the article.
+        Derive a specific image search query from the post content so the
+        Apify Google Images query matches what the post is actually about.
         """
         if source_label in ("Apify", "NewsAPI"):
-            # Extract first meaningful line of content (the headline)
+            # Use the headline (first line), strip emoji/punctuation
             first_line = content.split("\n")[0].strip()
-            # Strip emoji and wrapper prefixes to get clean search terms
             first_line = re.sub(r"[^\w\s\-']", " ", first_line).strip()
             first_line = re.sub(r"\s+", " ", first_line)
-            # Cap at 60 chars for a clean image search
             query = first_line[:60].strip()
             if len(query) > 15:
-                return f"{query} football sport"
+                return f"{query} football"
+
         if source_label in ("API-Football", "football-data.org"):
-            # Content has "FULL TIME: Team1 X-Y Team2" — extract team names
-            teams = re.findall(r"[A-Z][a-zA-Z\s]+(?= \d|–|-)", content)
-            if teams:
-                return f"{teams[0].strip()} football match action"
-        # Template or fallback — use team/league
+            # Standings format: "Club lead League with Xpts"
+            # Results format:   "FULL TIME: Team1 X–Y Team2"
+            # Extract the first proper-noun club name only
+            match = re.search(r"(?:TABLE:|FULL TIME[^:]*:)\s*([A-Z][A-Za-z\s]+?)(?:\s+\d|\s+lead|\s+FC\b)", content)
+            if match:
+                club = match.group(1).strip()
+                return f"{club} football"
+            # Fallback: grab first capitalised phrase before a number
+            match = re.search(r"([A-Z][A-Za-z\s]{3,25}?)\s+\d", content)
+            if match:
+                return f"{match.group(1).strip()} football match"
+
+        # Template or fallback
         if team_name:
-            return f"{team_name} football stadium action"
-        return f"{league_name} football match stadium crowd"
+            return f"{team_name} football"
+        return f"{league_name} football stadium"
 
     # ─── SOURCE 1: API-Football ───────────────────────────────────────────────
     def _fetch_apifootball(self, league_id, league_name, season):
@@ -502,7 +461,7 @@ class Command(BaseCommand):
         """
         Runs the Apify Google News Scraper Actor synchronously.
         Actor: apify~google-news-scraper
-        Returns list of {text, title} dicts — NO image (image comes from Pexels).
+        Returns list of {text, title} dicts — image fetched separately via Apify Google Images.
         """
         if not APIFY_TOKEN:
             return []
@@ -763,7 +722,7 @@ class Command(BaseCommand):
             is_short=False,
         )
 
-        # ── Image: Apify first (content-matched), then Pexels pool ──────────────
+        # ── Image: Apify Google Images (content-matched) ─────────────────────
         fav_team_name = getattr(bot, "favorite_team", None)
         fav_team_name = fav_team_name.name if fav_team_name else None
         img_query = self._build_image_query(
@@ -771,9 +730,6 @@ class Command(BaseCommand):
         )
         self.stdout.write(f"  🔍 Image query: {img_query}")
 
-        image_saved = False
-
-        # 1. Apify Google Images — matches the actual article content
         if APIFY_TOKEN:
             img_data = self._fetch_image_apify(img_query)
             if img_data:
@@ -785,32 +741,13 @@ class Command(BaseCommand):
                     )
                     new_post.post_type = "image"
                     new_post.save(update_fields=["post_type"])
-                    self.stdout.write("  🖼️  Apify image attached (content-matched)")
-                    image_saved = True
+                    self.stdout.write("  🖼️  Apify image attached")
                 except Exception as e:
-                    self.stdout.write(self.style.WARNING(f"  ⚠️  Apify image save failed: {e}"))
-
-        # 2. Pexels pool — unique league photo, never the same one twice per run
-        if not image_saved and PEXELS_API_KEY:
-            photo_url = self._get_unique_photo_url(league.name)
-            if photo_url:
-                try:
-                    res = requests.get(photo_url, timeout=15)
-                    if res.status_code == 200:
-                        new_post.media_file.save(
-                            f"post_{new_post.id}.jpg",
-                            ContentFile(res.content),
-                            save=True,
-                        )
-                        new_post.post_type = "image"
-                        new_post.save(update_fields=["post_type"])
-                        self.stdout.write("  🖼️  Pexels image attached (unique pool)")
-                        image_saved = True
-                except Exception as e:
-                    self.stdout.write(self.style.WARNING(f"  ⚠️  Pexels image failed: {e}"))
-
-        if not image_saved:
-            self.stdout.write("  ℹ️  No image attached (set APIFY_TOKEN or PEXELS_API_KEY)")
+                    self.stdout.write(self.style.WARNING(f"  ⚠️  Image save failed: {e}"))
+            else:
+                self.stdout.write("  ℹ️  Apify returned no image for this query")
+        else:
+            self.stdout.write("  ℹ️  No image — set APIFY_TOKEN to enable images")
 
         # ── Hashtags ──────────────────────────────────────────────────────────
         base_tags = ["Sports", "ConnectDial", league.name.replace(" ", "")]

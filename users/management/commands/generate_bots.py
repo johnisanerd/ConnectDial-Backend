@@ -170,7 +170,7 @@ FAN_BIOS = {
         "48 teams, one dream. {team} are lifting that trophy this summer! 🌟 #WorldCup2026",
     ],
     "generic": [
-        "Sports fan 🔥 {team} supporter. Here for the goals, the drama and the moments. #ConnectDial",
+        "Fan 🔥 {team} supporter. Here for the goals, the drama and the moments. #ConnectDial",
         "Passionate about {team} and {league}. Never miss a matchday. ⚽ #ConnectDial",
         "Football runs through my veins. {team} | {league} | ConnectDial 🏆",
     ],
@@ -406,7 +406,7 @@ class Command(BaseCommand):
 
             # Persona's image search term
             persona   = LEAGUE_PERSONA.get(fav_league.name.lower(), {})
-            img_query = persona.get("search", "sports fan crowd")
+            img_query = persona.get("search", "Fan crowd")
             if acc_type == 'news':
                 img_query = "news anchor journalist sports broadcast"
             elif acc_type == 'organization':

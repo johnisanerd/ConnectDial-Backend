@@ -25,14 +25,14 @@ PIXABAY_API_KEY = "YOUR_PIXABAY_KEY_HERE"
 # League-to-image-term mapping
 LEAGUE_IMG_TERMS = {
     "saudi pro league": ["arab man portrait", "gulf fan football", "middle east portrait sports"],
-    "premier league":   ["football fan portrait", "english fan crowd", "sports fan portrait"],
-    "champions league": ["football fan european", "sports fan portrait night", "fan portrait crowd"],
-    "la liga":          ["spanish football fan", "sports fan portrait", "football supporter"],
+    "premier league":   ["football fan portrait", "english fan crowd", "Fan portrait"],
+    "champions league": ["football fan european", "Fan portrait night", "fan portrait crowd"],
+    "la liga":          ["spanish football fan", "Fan portrait", "football supporter"],
     "bundesliga":       ["german fan portrait", "football supporter", "sports crowd fan"],
-    "nba":              ["basketball fan portrait", "hoops fan crowd", "sports fan arena"],
-    "mls":              ["soccer fan usa portrait", "american sports fan", "football fan usa"],
+    "nba":              ["basketball fan portrait", "hoops fan crowd", "Fan arena"],
+    "mls":              ["soccer fan usa portrait", "american Fan", "football fan usa"],
     "fifa world cup":   ["world cup fan portrait", "international football fan", "soccer fan flag"],
-    "default":          ["sports fan portrait", "football supporter crowd", "fan portrait stadium"],
+    "default":          ["Fan portrait", "football supporter crowd", "fan portrait stadium"],
 }
 
 
