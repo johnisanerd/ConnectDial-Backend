@@ -137,60 +137,104 @@ LEAGUE_PERSONA = {
     },
 }
 
-# ─── REALISTIC BIO TEMPLATES ─────────────────────────────────────────────────
+# ─── BIO TEMPLATES BY TYPE ───────────────────────────────────────────────────
+# 3 account types — each sounds completely different
+
 FAN_BIOS = {
     "saudi pro league": [
         "SPL fanatic 🇸🇦 Quiñones top scorer, Bento best GK — the Roshn League is ELITE. #ConnectDial",
         "Die-hard {team} fan. Saudi football has the biggest names in the world right now 🌟 #SPL",
-        "Al-Nassr 16-match winning run. Al-Hilal 29 unbeaten. The {team} title race is EVERYTHING 🏆 #RoshnLeague",
+        "Al-Nassr 16-match winning run. Al-Hilal 29 unbeaten. I live for this. {team} all the way 🏆",
         "Gulf football forever 🇸🇦 Following {team} every matchday on ConnectDial ⚽",
         "Saudi Pro League is not a gimmick league — {team} proves that weekly 🔥 #ConnectDial",
     ],
     "premier league": [
         "Die-hard {team} supporter 🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League is the only league that matters. #ConnectDial",
-        "Living and breathing {team}. Follow for PL content, memes & transfer gossip 🔥",
-        "Football > everything. {team} til I die ⚽ World Cup 2026 fever loading...",
+        "Living and breathing {team}. PL content, transfer gossip, matchday reactions 🔥",
+        "Football > everything. {team} til I die ⚽ World Cup 2026 fever is real.",
         "If it's about {team}, I'm all over it. Premier League forever. #PL #ConnectDial",
     ],
     "champions league": [
         "UCL nights hit different. {team} in European competition > everything else ⭐ #UCL",
         "Champions League football is the pinnacle. {team} believer til the final whistle 🏆",
-        "If you're not watching UCL you're missing the best sport on earth. {team} 💙",
+        "If you're not watching the UCL you're missing the best sport on earth. {team} 💙",
     ],
     "la liga": [
         "La Liga tactical genius appreciator 🇪🇸 {team} content daily. #LaLiga #ConnectDial",
-        "El Clásico season is always. {team} die-hard — the tactical battles are ELITE 🧠",
+        "El Clásico season is always. {team} die-hard — the battles are ELITE 🧠",
         "{team} supporter. La Liga is football IQ at its finest 🇪🇸 #ConnectDial",
     ],
     "fifa world cup": [
-        "WORLD CUP 2026 is happening in our backyard! 🏆🌍 Supporting {team} all the way! #WC2026",
+        "WORLD CUP 2026 is happening in our backyard! 🏆🌍 {team} all the way! #WC2026",
         "June 11 cannot come fast enough 🏆 {team} fan for the World Cup! #FIFA2026 #ConnectDial",
         "48 teams, one dream. {team} are lifting that trophy this summer! 🌟 #WorldCup2026",
-        "USA / Canada / Mexico 2026 — the greatest football event EVER and {team} will WIN IT! 🏆",
     ],
     "generic": [
-        "Sports fanatic 🌍 Football, basketball, everything. ConnectDial is my home 📱 #Sports",
-        "Live for matchday. Any sport, any league — if it's on ConnectDial, I'm watching ⚽🏀",
-        "Sports are life. {team} supporter. Following ConnectDial for all the updates! 🔥",
+        "Sports fan 🔥 {team} supporter. Here for the goals, the drama and the moments. #ConnectDial",
+        "Passionate about {team} and {league}. Never miss a matchday. ⚽ #ConnectDial",
+        "Football runs through my veins. {team} | {league} | ConnectDial 🏆",
     ],
 }
 
-NEWS_BIOS = [
-    "Breaking {league} news 24/7. Transfers · Results · Analysis ✅ #ConnectDial",
-    "Your fastest source for {league} updates. Verified news only 📡",
-    "All the {league} action — live scores, transfers, deep analysis. #ConnectDial",
-    "{league} news around the clock. No clickbait, just facts ✅",
-]
+ORGANIZATION_BIOS = {
+    "saudi pro league": [
+        "Official {team} supporters club. Connecting SPL fans around the world 🇸🇦 ✅ #RoshnLeague",
+        "{team} FC Community — the official fan organisation on ConnectDial. Join us! 🏟️",
+        "Roshn League fan community. {team} news, fixtures and matchday updates ✅ #SPL",
+    ],
+    "premier league": [
+        "Official {team} supporters trust. Premier League football, official updates ✅ #PL",
+        "{team} FC Community — connecting fans everywhere. Verified ✅ #PremierLeague",
+        "The official {team} fan organisation on ConnectDial 🏴󠁧󠁢󠁥󠁮󠁧󠁿 Fixtures · Results · News ✅",
+    ],
+    "champions league": [
+        "Official {team} European supporters club. UCL nights covered live ✅ ⭐ #UCL",
+        "{team} Champions League Community — every European match, every update ✅ #ChampionsLeague",
+    ],
+    "fifa world cup": [
+        "FIFA World Cup 2026 fan community. {team} supporters worldwide 🏆🌍 ✅ #WC2026",
+        "Official World Cup 2026 supporters hub. {team} coverage, matchday updates ✅",
+    ],
+    "generic": [
+        "Official {team} community on ConnectDial. Club news · Fixtures · Matchday ✅",
+        "{team} Supporters Organisation. Verified account ✅ Follow for official updates.",
+        "The home of {team} on ConnectDial 🏟️ Join our official community ✅",
+    ],
+}
 
-ORG_BIOS = [
-    "Supporting the growth of {league} worldwide. Official Account ✅ #ConnectDial",
-    "Connecting {league} fans globally. Join our community 🌍",
-    "Official {league} fan community. Events, analysis, supporters' network 🏟️",
-]
+NEWS_BIOS = {
+    "saudi pro league": [
+        "SPL news 24/7. Roshn League 2025-26 coverage — Quiñones 28 goals, Bento 13 clean sheets ✅ #ConnectDial",
+        "Official Saudi Pro League news source. Al-Nassr · Al-Hilal · All clubs. Verified ✅",
+        "Fastest SPL transfer news, results and analysis on ConnectDial 🇸🇦 #RoshnLeague",
+    ],
+    "premier league": [
+        "Breaking Premier League news around the clock. Transfers · Results · Analysis ✅ #PL",
+        "Your fastest EPL source on ConnectDial. Verified football journalism 🏴󠁧󠁢󠁥󠁮󠁧󠁿 #PremierLeague",
+        "PL transfers, results, breaking news. Verified media account ✅ #ConnectDial",
+    ],
+    "champions league": [
+        "UEFA Champions League news 24/7. Every result, every transfer, verified ✅ #UCL",
+        "Your fastest UCL source on ConnectDial. Knockout nights covered live ⭐ #ChampionsLeague",
+    ],
+    "fifa world cup": [
+        "FIFA World Cup 2026 coverage. USA / Mexico / Canada — 48 nations, 104 matches ✅ #WC2026",
+        "World Cup 2026 news hub. June 11 – July 19. Every goal, every story 🏆 #ConnectDial",
+    ],
+    "nba": [
+        "NBA news 24/7 — scores, trades, analysis. Verified sports media ✅ #NBA #ConnectDial",
+        "Breaking basketball news. OKC · Spurs · Every team covered ✅ #NBA",
+    ],
+    "generic": [
+        "Breaking {league} news 24/7. Verified facts, fastest updates ✅ #ConnectDial",
+        "Your fastest source for {league} news. Transfers · Results · Deep analysis ✅",
+        "{league} media. Official news account on ConnectDial ✅",
+    ],
+}
 
 
 class Command(BaseCommand):
-    help = 'Generates world-class, 2026-accurate fan, news and org bots with correct personas'
+    help = 'Generates fan, organization/club and news bots with distinct personas'
 
     def add_arguments(self, parser):
         parser.add_argument('total', type=int, help='Number of bots to create')
@@ -255,13 +299,19 @@ class Command(BaseCommand):
     def _build_bio(self, acc_type, fav_league, fav_team):
         ln    = fav_league.name.lower()
         tname = fav_team.name if fav_team else fav_league.name
+
         if acc_type == 'fan':
             pool = FAN_BIOS.get(ln, FAN_BIOS["generic"])
-            return random.choice(pool).replace("{team}", tname).replace("{league}", fav_league.name)
         elif acc_type == 'news':
-            return random.choice(NEWS_BIOS).format(league=fav_league.name)
-        else:
-            return random.choice(ORG_BIOS).format(league=fav_league.name)
+            pool = NEWS_BIOS.get(ln, NEWS_BIOS["generic"])
+        else:  # organization / club
+            pool = ORGANIZATION_BIOS.get(ln, ORGANIZATION_BIOS["generic"])
+
+        return (
+            random.choice(pool)
+            .replace("{team}", tname)
+            .replace("{league}", fav_league.name)
+        )
 
     # ── IMAGE FETCHER ─────────────────────────────────────────────────────────
     def _fetch_profile_image(self, search_term, user_id, retries=3):
@@ -340,9 +390,11 @@ class Command(BaseCommand):
         failed  = 0
 
         for i in range(total):
+            # ── Account type distribution ────────────────────────────────────
+            # 75% fan  |  15% organization/club  |  10% news
             rand_val  = random.random()
-            acc_type  = 'fan' if rand_val < 0.85 else ('news' if rand_val < 0.94 else 'organization')
-            badge     = 'none' if acc_type == 'fan' else ('official' if acc_type == 'news' else 'verified')
+            acc_type  = 'fan' if rand_val < 0.75 else ('organization' if rand_val < 0.90 else 'news')
+            badge     = 'none' if acc_type == 'fan' else ('verified' if acc_type == 'organization' else 'official')
 
             suffix     = random.randint(1000, 9999)
             fav_league = random.choice(leagues)
