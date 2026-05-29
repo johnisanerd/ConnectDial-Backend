@@ -25,10 +25,11 @@ Run:
 """
 
 import os
+import re
 import random
 import requests
 import hashlib
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone as _dt_tz
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
@@ -47,6 +48,27 @@ RAPID_API_KEY         = os.environ.get("RAPID_API_KEY", "YOUR_RAPIDAPI_KEY_HERE"
 FOOTBALL_DATA_API_KEY = os.environ.get("FOOTBALL_DATA_API_KEY", "YOUR_FOOTBALL_DATA_ORG_KEY")
 PIXABAY_API_KEY       = os.environ.get("PIXABAY_API_KEY", "YOUR_PIXABAY_KEY_HERE")
 PEXELS_API_KEY        = os.environ.get("PEXELS_API_KEY", "")
+
+# ─── NEWS QUALITY CONTROLS ───────────────────────────────────────────────────
+# Only post news published within this many days (keeps the feed "now", not stale).
+NEWS_MAX_AGE_DAYS = 2
+
+# Reject any article whose title/description contains these — gambling, casino,
+# affiliate spam, crypto shilling, listicle junk, etc.
+NEWS_SPAM_KEYWORDS = {
+    "slot", "slots", "casino", "gambling", "gamble", "betting", "bet365", "1xbet",
+    "betway", "mines", "aviator", "jackpot", "roulette", "poker", "free spins",
+    "bonus code", "promo code", "no deposit", "odds boost", "prediction site",
+    "crypto", "bitcoin", "nft", "coupon", "voucher", "discount code", "giveaway",
+    "how to win", "best sites", "top 10 sites", "review 2026", "sign up offer",
+}
+
+# Words a clean headline should never *end* on (sign it was truncated mid-sentence).
+_DANGLING_WORDS = {
+    "as", "the", "and", "to", "of", "for", "with", "in", "on", "at", "a", "an",
+    "but", "or", "that", "this", "is", "are", "was", "were", "by", "from", "his",
+    "her", "their", "its", "amid", "after", "before", "over", "into",
+}
 
 # ─── LEAGUE CONFIG ───────────────────────────────────────────────────────────
 LEAGUE_CONFIG = {
@@ -192,6 +214,55 @@ class Command(BaseCommand):
     def _bot_post_count_today(self, bot):
         today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
         return Post.objects.filter(author=bot, created_at__gte=today_start).count()
+
+    # ── GLOBAL DEDUP (across ALL bots, not just one) ─────────────────────────
+    def _seen_globally(self, snippet, days=NEWS_MAX_AGE_DAYS):
+        """True if ANY post in the last `days` already contains this text snippet."""
+        key = (snippet or "").strip()[:60]
+        if not key:
+            return True
+        cutoff = timezone.now() - timedelta(days=days)
+        return Post.objects.filter(created_at__gte=cutoff, content__icontains=key).exists()
+
+    # ── NEWS QUALITY HELPERS ─────────────────────────────────────────────────
+    def _is_spam(self, text):
+        t = (text or "").lower()
+        return any(kw in t for kw in NEWS_SPAM_KEYWORDS)
+
+    def _is_recent(self, published_at):
+        """published_at is NewsAPI ISO8601, e.g. '2026-05-29T13:00:00Z'."""
+        if not published_at:
+            return False
+        try:
+            dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+            return (datetime.now(_dt_tz.utc) - dt) <= timedelta(days=NEWS_MAX_AGE_DAYS)
+        except Exception:
+            return False
+
+    def _clean_title(self, title, source):
+        """Strip the ' - Source' suffix NewsAPI appends and tidy whitespace."""
+        title = (title or "").strip()
+        if source and title.lower().endswith(source.lower()):
+            # remove trailing ' - Source' / ' | Source'
+            title = re.sub(r'\s*[-|–]\s*' + re.escape(source) + r'\s*$', '', title, flags=re.I).strip()
+        return title
+
+    def _is_truncated(self, title):
+        words = (title or "").rstrip(" .!?…").split()
+        if not words:
+            return True
+        return words[-1].lower() in _DANGLING_WORDS
+
+    def _is_relevant(self, title, desc, league_name, team_names):
+        """Article must clearly reference THIS league or one of its teams."""
+        blob = f"{title} {desc}".lower()
+        if league_name.lower() in blob:
+            return True
+        # also accept common league aliases
+        aliases = {a.lower() for a in LEAGUE_CONFIG.get(league_name.lower(), {}).get("hashtags", [])}
+        if any(a in blob.replace(" ", "") for a in aliases):
+            return True
+        return any(tn.lower() in blob for tn in team_names if len(tn) > 3)
 
     # ── SOURCE 1: API-Football (fixtures + standings + scorers) ──────────────
     def fetch_apifootball(self, league_id, league_name, season):
@@ -350,36 +421,58 @@ class Command(BaseCommand):
         return posts
 
     # ── SOURCE 3: NewsAPI ─────────────────────────────────────────────────────
-    def fetch_newsapi(self, league_name):
-        # Also inject World Cup query for extra reach
+    def fetch_newsapi(self, league_name, team_names):
+        """Return a list of clean, recent, on-topic candidates: [{text,image_url,title}]."""
         query = league_name
         if "world cup" in league_name.lower():
             query = "FIFA World Cup 2026"
+        from_date = (timezone.now() - timedelta(days=NEWS_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
         url = (
             f"https://newsapi.org/v2/everything"
-            f"?q={query.replace(' ', '%20')}&sortBy=publishedAt"
-            f"&language=en&pageSize=20&apiKey={NEWS_API_KEY}"
+            f"?q={requests.utils.quote(query)}"
+            f"&searchIn=title,description"      # keep query in the headline, not body
+            f"&from={from_date}"
+            f"&sortBy=publishedAt&language=en&pageSize=30&apiKey={NEWS_API_KEY}"
         )
+        cfg   = LEAGUE_CONFIG.get(league_name.lower(), {})
+        emoji = cfg.get("emoji", "📰")
+        candidates = []
         try:
-            data      = requests.get(url, timeout=8).json()
-            articles  = data.get('articles', [])
-            if not articles:
-                return None, None
-            article   = random.choice(articles[:8])
-            title     = article.get('title', '')
-            desc      = article.get('description', '') or ''
-            source    = article['source']['name']
-            image_url = article.get('urlToImage')
-            cfg       = LEAGUE_CONFIG.get(league_name.lower(), {})
-            emoji     = cfg.get("emoji", "📰")
-            post_text = (
+            data     = requests.get(url, timeout=8).json()
+            articles = data.get('articles', [])
+        except Exception:
+            return []
+
+        for article in articles:
+            title  = article.get('title', '') or ''
+            desc   = article.get('description', '') or ''
+            source = (article.get('source') or {}).get('name', '') or ''
+            pub    = article.get('publishedAt', '')
+            image  = article.get('urlToImage')
+
+            title = self._clean_title(title, source)
+
+            # ── Filters ──────────────────────────────────────────────────────
+            if not title or len(title) < 15:
+                continue
+            if not self._is_recent(pub):                       # no stale/past events
+                continue
+            if self._is_spam(title) or self._is_spam(desc):    # no casino/betting junk
+                continue
+            if self._is_truncated(title):                      # no mid-sentence headlines
+                continue
+            if not self._is_relevant(title, desc, league_name, team_names):
+                continue  # wrong competition / off-topic
+
+            text = (
                 f"{emoji} {title}\n\n"
                 f"{desc[:220].strip()}{'...' if len(desc) > 220 else ''}\n\n"
                 f"(via {source}) #{league_name.replace(' ','')} #ConnectDial"
             )
-            return post_text, image_url
-        except Exception:
-            return None, None
+            candidates.append({"text": text, "image_url": image, "title": title})
+
+        return candidates
+
 
     # ── IMAGE FALLBACK: Pixabay ──────────────────────────────────────────────
     def _fetch_image_pixabay(self, search_term):
@@ -474,6 +567,7 @@ class Command(BaseCommand):
         fd_code   = cfg.get("fd_code")
         season    = cfg.get("season", 2025)
         tags_cfg  = cfg.get("hashtags", [])
+        team_names = list(Team.objects.filter(league=league).values_list('name', flat=True))
 
         # Recruit a bot — prefer one that matches league AND hasn't hit daily cap
         bot = None
@@ -523,10 +617,22 @@ class Command(BaseCommand):
 
         if not content and source_pref in ('auto', 'newsapi') and NEWS_API_KEY:
             self.stdout.write(f"  📰 Falling back to NewsAPI...")
-            content, image_url = self.fetch_newsapi(league.name)
-            if content:
+            candidates = self.fetch_newsapi(league.name, team_names)
+            for cand in candidates:
+                # Global dedup: skip if any bot already posted this story recently
+                if self._seen_globally(cand["title"]):
+                    continue
+                content   = cand["text"]
+                image_url = cand["image_url"]
                 source_label = "NewsAPI"
-                self.stdout.write(self.style.SUCCESS("  ✅ NewsAPI headline retrieved"))
+                self.stdout.write(self.style.SUCCESS(
+                    f"  ✅ NewsAPI headline (fresh, on-topic): {cand['title'][:70]}"
+                ))
+                break
+            if not content and candidates:
+                self.stdout.write("  ⏭️  All recent headlines already posted — using template instead.")
+            elif not candidates:
+                self.stdout.write("  ⏭️  No fresh, on-topic, non-spam headlines — using template instead.")
 
         if not content:
             self.stdout.write(f"  📋 Using season-accurate offline template...")
@@ -536,7 +642,9 @@ class Command(BaseCommand):
             content = self.offline_template(league.name, bot_type, subject=subj)
             for _ in range(12):
                 content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
-                if not self._already_posted_this_week(bot, content_hash):
+                dup_self   = self._already_posted_this_week(bot, content_hash)
+                dup_global = self._seen_globally(content, days=1)
+                if not dup_self and not dup_global:
                     break
                 content = self.offline_template(league.name, bot_type, subject=subj)
             source_label = "Template"
