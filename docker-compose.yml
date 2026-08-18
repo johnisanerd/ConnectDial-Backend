@@ -1,77 +1,122 @@
-version: '3.8'
-
 services:
+
+  db:
+    image: postgres:15-alpine
+    container_name: connectdial_db
+    restart: always
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: connectdial_db
+      POSTGRES_USER: gilly
+      # POSTGRES_PASSWORD is automatically pulled from your local .env file
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gilly -d connectdial_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: connectdial_minio
+    restart: always
+    env_file:
+      - .env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio_password_change_me}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:9000:9000"       # API endpoint port
+      - "127.0.0.1:9001:9001"       # Web GUI administration dashboard port
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   web:
     build: .
     container_name: connectdial_web
     restart: always
-
     env_file:
       - .env
-
     volumes:
       - media_data:/app/media
       - static_data:/app/staticfiles
-
     ports:
       - "127.0.0.1:8000:8000"
-
     command: >
       gunicorn connectdial.wsgi:application
       --bind 0.0.0.0:8000
       --workers 4
       --threads 4
       --timeout 600
-
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - default
+      - npm_network
 
   celery_worker:
     build: .
     container_name: connectdial_worker
     restart: always
-
     env_file:
       - .env
-
     volumes:
       - media_data:/app/media
       - static_data:/app/staticfiles
-
+    entrypoint: [] # 🚨 Overrides entrypoint.sh to stop concurrent migration locks
     command: >
       celery -A connectdial worker
       --loglevel=info
       --concurrency=2
-
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
 
   celery_beat:
     build: .
     container_name: connectdial_beat
     restart: always
-
     env_file:
       - .env
-
     volumes:
       - media_data:/app/media
       - static_data:/app/staticfiles
-
+    entrypoint: [] # 🚨 Overrides entrypoint.sh to stop concurrent migration locks
     command: celery -A connectdial beat --loglevel=info
-
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
 
   redis:
     image: redis:7-alpine
     container_name: connectdial_redis
     restart: always
-
     ports:
       - "127.0.0.1:6379:6379"
 
 volumes:
   media_data:
   static_data:
+  postgres_data:   # Persistent engine volume for database records
+  minio_data:      # Persistent local object engine block storage
+networks:
+  npm_network:
+    name: shared_proxy_network
+    external: true

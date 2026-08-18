@@ -3,19 +3,21 @@ from rest_framework.permissions import AllowAny
 from .models import League, Team
 from .serializers import LeagueSerializer, TeamSerializer
 
+
 class LeagueViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = League.objects.all().order_by('id')
     serializer_class = LeagueSerializer
-    
-    # 🚀 THIS IS THE FIX: Disable authentication for this view
-    authentication_classes = [] 
-    permission_classes = [AllowAny] 
+
+    # Disable authentication for this view
+    authentication_classes = []
+    permission_classes = [AllowAny]
     pagination_class = None
+
 
 class TeamViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = TeamSerializer
-    
-    # 🚀 THIS IS THE FIX: Disable authentication for this view
+
+    # Disable authentication for this view
     authentication_classes = []
     permission_classes = [AllowAny]
     pagination_class = None

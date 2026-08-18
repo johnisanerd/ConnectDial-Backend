@@ -16,7 +16,9 @@ Covers (2025-26 accurate):
 Logic:
   • League exists + has teams   → skip entirely (no DB writes)
   • League exists + no teams    → add teams only
-  • League missing              → create league + add teams
+  • League missing              → create league + add teams (manual PK)
+  • Team name unique per-league, not globally — same name can exist
+    across different leagues (e.g. "England" in Cricket and Rugby)
   • Logo download fails         → continue without logo (non-fatal)
   • All operations idempotent — safe to run multiple times
 """
@@ -230,7 +232,6 @@ LEAGUES = [
         ("Columbus Crew",           "columbus_crew.png"),
         ("D.C. United",             "dc_united.png"),
         ("Inter Miami CF",          "inter_miami.png"),
-        ("CF Montréal",             "montreal.png"),
         ("Nashville SC",            "nashville_sc.png"),
         ("New England Revolution",  "new_england.png"),
         ("New York City FC",        "nycfc.png"),
@@ -714,22 +715,24 @@ class Command(BaseCommand):
 
         for league_name, abbr, sport, teams_data in LEAGUES:
 
-            # ── 1. Get or create league ───────────────────────────────────────
-            league, league_created = League.objects.get_or_create(
-                name=league_name,
-                defaults={
-                    'abbreviation': abbr,
-                    # sport field only written if the model has it
-                }
-            )
+            # ── 1. Get or create league (manual PK — no get_or_create) ───────
+            league = League.objects.filter(name=league_name).first()
+            league_created = False
+            if league is None:
+                next_league_id = self._next_id(League)
+                league = League.objects.create(
+                    id=next_league_id,
+                    name=league_name,
+                    abbreviation=abbr,
+                )
+                league_created = True
 
-            # Try to set sport field if the model supports it
             if league_created:
                 try:
                     league.sport = sport
                     league.save(update_fields=['sport'])
                 except Exception:
-                    pass  # field may not exist — non-fatal
+                    pass  # field may not exist on this model — non-fatal
                 total_leagues_created += 1
                 self.stdout.write(
                     self.style.SUCCESS(f'  ✅ Created league: {league_name}')
@@ -737,7 +740,20 @@ class Command(BaseCommand):
             else:
                 self.stdout.write(f'  ⏭️  League exists: {league_name}')
 
-            # ── 2. Check existing team count ──────────────────────────────────
+            # ── 2. Deduplicate the source data itself (defensive) ─────────────
+            seen = set()
+            deduped_teams_data = []
+            for team_name, logo_file in teams_data:
+                if team_name in seen:
+                    self.stdout.write(self.style.WARNING(
+                        f'     ⚠️  Duplicate "{team_name}" within {league_name} data — skipped'
+                    ))
+                    continue
+                seen.add(team_name)
+                deduped_teams_data.append((team_name, logo_file))
+            teams_data = deduped_teams_data
+
+            # ── 3. Check existing team count ──────────────────────────────────
             existing_count = Team.objects.filter(league=league).count()
             expected_count = len(teams_data)
 
@@ -753,7 +769,7 @@ class Command(BaseCommand):
                     f'adding missing teams'
                 )
 
-            # ── 3. Add each team ──────────────────────────────────────────────
+            # ── 4. Add each team (manual PK — no get_or_create) ───────────────
             existing_names = set(
                 Team.objects.filter(league=league).values_list('name', flat=True)
             )
@@ -769,15 +785,13 @@ class Command(BaseCommand):
                                 total_logos_saved += 1
                     continue
 
-                # Create new team
-                last_team = Team.objects.order_by('-id').first()
-                next_id = 1 if not last_team else last_team.id + 1
-
+                next_team_id = self._next_id(Team)
                 team = Team.objects.create(
-                    id=next_id,
+                    id=next_team_id,
                     name=team_name,
-                    league=league
+                    league=league,
                 )
+                existing_names.add(team_name)  # keep in sync within this run
                 total_teams_created += 1
                 self.stdout.write(f'     + {team_name}')
 
@@ -793,6 +807,15 @@ class Command(BaseCommand):
             f'   Teams created   : {total_teams_created}\n'
             f'   Logos saved     : {total_logos_saved}'
         ))
+
+    # ── Manual PK helper ────────────────────────────────────────────────────
+    def _next_id(self, model):
+        """
+        Returns max(id) + 1 for a manual-PK model, defaulting to 1 if empty.
+        Safe for this single-process seeder run; not safe under concurrent writers.
+        """
+        last = model.objects.order_by('-id').values_list('id', flat=True).first()
+        return (last or 0) + 1
 
     # ── Logo downloader ───────────────────────────────────────────────────────
     def _download_logo(self, team, filename):

@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 from datetime import timedelta
-from google.oauth2 import service_account
 from dotenv import load_dotenv
 from celery.schedules import crontab
 
@@ -15,7 +14,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
-# ✅ UPDATED: Added your new domain api.dataforgeprism.com here.
 ALLOWED_HOSTS = [
     '192.168.100.107',
     'localhost',
@@ -32,7 +30,6 @@ ALLOWED_HOSTS = [
 AUTH_USER_MODEL = 'users.User'
 SITE_ID = 1
 
-# ✅ GOOGLE_CLIENT_ID — Web OAuth 2.0 Client ID from Google Cloud Console.
 GOOGLE_CLIENT_ID         = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_ANDROID_CLIENT_ID = os.getenv('GOOGLE_ANDROID_CLIENT_ID', '')  
 GOOGLE_IOS_CLIENT_ID     = os.getenv('GOOGLE_IOS_CLIENT_ID', '')      
@@ -79,6 +76,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # Serves static files directly (added for /static fix)
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -97,14 +95,40 @@ WSGI_APPLICATION = 'connectdial.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE':   'django.db.backends.postgresql',
-        'NAME':     'connectdial_db',
+        'NAME':     'connectdial_db',  # Changed from 'db' to match standard database setups
         'USER':     'gilly',
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
-        'HOST':     os.getenv('DB_HOST', 'localhost'),
+        'HOST':     os.getenv('DB_HOST', 'db'),
         'PORT':     os.getenv('DB_PORT', '5432'),
     }
 }
+# ======================
+# STATIC & MEDIA — MinIO (S3 Compatible Storage)
+# ======================
+STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_STORAGE_BUCKET_NAME = os.getenv('AWS_STORAGE_BUCKET_NAME', 'connectdial-media')
+AWS_S3_ENDPOINT_URL = os.getenv('AWS_S3_ENDPOINT_URL', 'http://minio:9000')
 
+AWS_S3_FILE_OVERWRITE = False
+AWS_QUERYSTRING_AUTH = False
+AWS_S3_CUSTOM_DOMAIN = os.getenv('AWS_S3_CUSTOM_DOMAIN')
+
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage"
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    },
+}
+
+if AWS_S3_CUSTOM_DOMAIN:
+    MEDIA_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/{AWS_STORAGE_BUCKET_NAME}/"
+else:
+    MEDIA_URL = f"{AWS_S3_ENDPOINT_URL}/{AWS_STORAGE_BUCKET_NAME}/"
 # ======================
 # TEMPLATES
 # ======================
@@ -125,38 +149,8 @@ TEMPLATES = [
 ]
 
 # ======================
-# STATIC & MEDIA — Google Cloud Storage (Firebase Storage bucket)
+# CORS & CSRF
 # ======================
-STATIC_URL  = 'static/'
-GS_BUCKET_NAME = 'connect-c894b.firebasestorage.app'
-GS_KEY_PATH    = os.path.join(BASE_DIR, 'firebase-service-account.json')
-
-if os.path.exists(GS_KEY_PATH):
-    GS_CREDENTIALS = service_account.Credentials.from_service_account_file(GS_KEY_PATH)
-
-    STORAGES = {
-        "default":     {"BACKEND": "storages.backends.gcloud.GoogleCloudStorage"},
-        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
-    }
-
-    MEDIA_URL = f'https://storage.googleapis.com/{GS_BUCKET_NAME}/'
-    GS_QUERYSTRING_AUTH = False
-    GS_FILE_OVERWRITE = False
-    GS_OBJECT_PARAMETERS = {
-        'cache_control': 'public, max-age=86400',
-    }
-else:
-    MEDIA_URL  = '/media/'
-    MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
-
-GS_DEFAULT_TIMEOUT    = 300
-GS_CONNECTION_TIMEOUT = 300
-GS_BLOB_CHUNK_SIZE    = 1024 * 1024 * 16  
-
-# ======================
-# CORS
-# ======================
-# ✅ UPDATED: Pointed origins to your new domain names.
 CORS_ALLOWED_ORIGINS = [
     'http://16.16.95.218',
     'https://16.16.95.218',
@@ -165,10 +159,6 @@ CORS_ALLOWED_ORIGINS = [
 ]
 CORS_ALLOW_CREDENTIALS = True
 
-# ======================
-# CSRF
-# ======================
-# ✅ UPDATED: Pointed trusted origins to your new domain names.
 CSRF_TRUSTED_ORIGINS = [
     'http://16.16.95.218',
     'https://16.16.95.218',
