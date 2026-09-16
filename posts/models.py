@@ -1,4 +1,5 @@
 from django.db import models
+from connectdial.media import build_media_url
 from django.conf import settings
 from django.core.cache import cache
 from leagues.models import League, Team
@@ -98,12 +99,7 @@ class Post(models.Model):
         return f"{self.author_id} – {self.post_type} – {self.league_id}"
 
     def get_media_url(self, request=None):
-        if not self.media_file:
-            return None
-        url = self.media_file.url
-        if request:
-            return request.build_absolute_uri(url)
-        return url
+        return build_media_url(self.media_file, request)
 
     # ── Atomic counter helpers ────────────────────────────────────────
     def increment_view(self):

@@ -5,6 +5,7 @@ from drf_spectacular.utils import extend_schema_field
 
 from .models import User, FanPreference, Profile, Follow
 from leagues.models import League, Team
+from connectdial.media import build_media_url
 
 
 class FanPreferenceSerializer(serializers.ModelSerializer):
@@ -197,6 +198,12 @@ class ProfileSerializer(serializers.ModelSerializer):
             'is_following', 'followers_count', 'following_count',
         ]
         read_only_fields = ['username', 'is_following', 'followers_count', 'following_count']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['profile_image'] = build_media_url(instance.profile_image, self.context.get('request'))
+        data['banner_image'] = build_media_url(instance.banner_image, self.context.get('request'))
+        return data
 
     @extend_schema_field(OpenApiTypes.BOOL)
     def get_is_following(self, obj):

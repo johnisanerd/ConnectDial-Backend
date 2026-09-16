@@ -86,6 +86,8 @@ services:
         condition: service_started
       db:
         condition: service_healthy
+      minio:
+        condition: service_healthy
 
   celery_beat:
     build: .

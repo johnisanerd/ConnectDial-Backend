@@ -163,7 +163,10 @@ def view_deleted(sender, instance, **kwargs):
 
 @receiver(post_save, sender=ShortVideo)
 def video_published(sender, instance, created, **kwargs):
-    if not created:
+    # A freshly uploaded short is created in `processing` state and only
+    # becomes feed-visible after the worker publishes it. Bust caches when
+    # the object is actually published, not merely when the DB row is created.
+    if instance.status != 'published':
         return
 
     from .feed_algorithm import bust_feed_cache

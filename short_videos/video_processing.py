@@ -1,6 +1,4 @@
-"""
-ConnectDial — Video Processing Utilities
-"""
+"""SportTribe video processing utilities."""
 
 import os
 import subprocess
@@ -20,23 +18,36 @@ def extract_duration(file_path: str) -> int:
             capture_output=True,
             text=True,
             timeout=30,
+            check=True,
         )
-        return int(float(result.stdout.strip()))
+        return max(0, int(float(result.stdout.strip())))
     except Exception:
         return 0
 
 
 def compress_video(input_path: str, output_path: str) -> None:
-    """Re-encode with faststart for progressive playback."""
+    """Create a broadly compatible MP4 optimized for progressive mobile playback."""
     subprocess.run(
         [
-            'ffmpeg', '-i', input_path,
-            '-vcodec', 'libx264',
-            '-crf', '28',
-            '-preset', 'fast',
-            '-acodec', 'aac',
+            'ffmpeg',
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-i', input_path,
+            '-map', '0:v:0',
+            '-map', '0:a:0?',
+            '-vf', r'scale=min(1080\,iw):-2',
+            '-c:v', 'libx264',
+            '-preset', 'veryfast',
+            '-crf', '26',
+            '-pix_fmt', 'yuv420p',
+            '-profile:v', 'main',
+            '-level', '4.0',
+            '-c:a', 'aac',
             '-b:a', '128k',
+            '-ar', '48000',
+            '-ac', '2',
             '-movflags', '+faststart',
+            '-map_metadata', '-1',
             '-y',
             output_path,
         ],
@@ -46,7 +57,7 @@ def compress_video(input_path: str, output_path: str) -> None:
 
 
 def generate_thumbnail(video_path: str) -> bytes:
-    """Generate JPEG thumbnail at 1-second mark."""
+    """Generate a JPEG thumbnail near the beginning of the video."""
     thumb_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as thumb:
@@ -54,11 +65,16 @@ def generate_thumbnail(video_path: str) -> bytes:
 
         subprocess.run(
             [
-                'ffmpeg', '-i', video_path,
-                '-ss', '00:00:01',
-                '-vframes', '1',
-                '-vf', 'scale=480:-1',
-                '-y', thumb_path,
+                'ffmpeg',
+                '-hide_banner',
+                '-loglevel', 'error',
+                '-ss', '00:00:00.500',
+                '-i', video_path,
+                '-frames:v', '1',
+                '-vf', r'scale=min(720\,iw):-2',
+                '-q:v', '3',
+                '-y',
+                thumb_path,
             ],
             check=True,
             timeout=60,

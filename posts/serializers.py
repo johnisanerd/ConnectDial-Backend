@@ -19,6 +19,7 @@ KEY FIX:
 """
 
 from rest_framework import serializers
+from connectdial.media import build_media_url
 from django.contrib.auth import get_user_model
 from drf_spectacular.utils import extend_schema_field
 from drf_spectacular.types import OpenApiTypes
@@ -34,15 +35,7 @@ User = get_user_model()
 # ─────────────────────────────────────────────────────────────────────
 
 def _build_url(request, file_field):
-    """Return an absolute URL for a FileField/ImageField, or None."""
-    if not file_field:
-        return None
-    try:
-        url = file_field.url
-    except Exception:
-        return None
-    return request.build_absolute_uri(url) if request else url
-
+    return build_media_url(file_field, request)
 
 # ─────────────────────────────────────────────────────────────────────
 # MIXIN – "Supports [Team]" badge

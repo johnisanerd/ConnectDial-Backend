@@ -16,9 +16,7 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from .views import health_check
-from django.conf.urls.static import static
-from django.conf import settings
+from .views import health_check, media_proxy
 from drf_spectacular.views import (
     SpectacularAPIView,
     SpectacularSwaggerView,
@@ -28,6 +26,7 @@ from drf_spectacular.views import (
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/health/', health_check),
+    path('api/media/<path:key>', media_proxy, name='media-proxy'),
     path('api/posts/', include('posts.urls')),  # <--- Posts API
     path('auth/', include('users.urls')),  # login + registration
     path('api/notifications/', include('notifications.urls')),
@@ -46,6 +45,3 @@ urlpatterns = [
 
 
 ]
-
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

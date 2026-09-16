@@ -26,22 +26,18 @@ Comments
 """
 
 # ── stdlib ────────────────────────────────────────────────────────────────────
-import os
-import tempfile
 import threading
 from urllib.parse import quote
 
 # ── Django ────────────────────────────────────────────────────────────────────
 from django.contrib.auth import get_user_model
-from django.core.files import File
-from django.core.files.base import ContentFile
 from django.db.models import F
 from django.shortcuts import get_object_or_404
+from connectdial.media import build_media_url
 
 # ── DRF ──────────────────────────────────────────────────────────────────────
 from rest_framework import generics, status
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
-from rest_framework.authtoken.models import Token
 from rest_framework.generics import ListAPIView
 from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -63,10 +59,6 @@ from .streaming import (
     build_telegram_share_text,
     build_whatsapp_share_text,
     stream_video_response,
-)
-from .video_processing import (
-    extract_duration,
-    generate_thumbnail,
 )
 
 User = get_user_model()
@@ -193,7 +185,7 @@ class ShortVideoUploadView(generics.CreateAPIView):
             duration=0,
             league=league,
             team=team,
-            status='published',
+            status='processing',
             video=video_file,
         )
 
@@ -210,8 +202,8 @@ class ShortVideoUploadView(generics.CreateAPIView):
         except Exception:
 
             t = threading.Thread(
-                target=self._save_raw_and_publish_fast,
-                args=(instance,),
+                target=self._process_in_background,
+                args=(instance.pk,),
                 daemon=True,
             )
 
@@ -219,68 +211,18 @@ class ShortVideoUploadView(generics.CreateAPIView):
 
         return instance
 
-    def _save_raw_and_publish_fast(self, instance):
+    def _process_in_background(self, video_pk):
+        """Fallback when the Celery broker is temporarily unavailable.
 
+        Uses the same storage-safe processing path as the Celery worker instead
+        of accessing ``FieldFile.path`` (which does not exist for MinIO/S3).
+        """
         try:
-
-            if not instance.video:
-                return
-
-            video_path = instance.video.path
-
-            # ─────────────────────────────────────────
-            # DURATION
-            # ─────────────────────────────────────────
-
-            try:
-                duration = extract_duration(video_path)
-
-            except Exception:
-                duration = 0
-
-            instance.duration = duration
-
-            update_fields = ['duration']
-
-            # ─────────────────────────────────────────
-            # THUMBNAIL
-            # ─────────────────────────────────────────
-
-            try:
-
-                thumb_bytes = generate_thumbnail(video_path)
-
-                instance.thumbnail.save(
-                    f'thumb_{instance.pk}.jpg',
-                    ContentFile(thumb_bytes),
-                    save=False,
-                )
-
-                update_fields.append('thumbnail')
-
-            except Exception:
-                pass
-
-            # ─────────────────────────────────────────
-            # PUBLISH
-            # ─────────────────────────────────────────
-
-            instance.status = 'published'
-
-            update_fields.append('status')
-
-            instance.save(update_fields=update_fields)
-
+            from .tasks import process_short_video
+            process_short_video.run(str(video_pk))
         except Exception:
-
-            try:
-
-                instance.status = 'published'
-
-                instance.save(update_fields=['status'])
-
-            except Exception:
-                pass
+            # The task itself records failed status; do not publish raw media.
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -431,10 +373,7 @@ class VideoLikeToggleView(APIView):
 
             like.delete()
 
-            ShortVideo.objects.filter(pk=pk).update(
-                cached_likes=F('cached_likes') - 1
-            )
-
+            # post_delete signal updates cached_likes atomically.
             video.refresh_from_db(fields=['cached_likes'])
 
             return Response(
@@ -450,10 +389,7 @@ class VideoLikeToggleView(APIView):
             video=video
         )
 
-        ShortVideo.objects.filter(pk=pk).update(
-            cached_likes=F('cached_likes') + 1
-        )
-
+        # post_save signal updates cached_likes atomically.
         video.refresh_from_db(fields=['cached_likes'])
 
         return Response(
@@ -481,7 +417,7 @@ class VideoViewRecordView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save(user=request.user, video=video)
 
-        ShortVideo.objects.filter(pk=pk).update(cached_views=F('cached_views') + 1)
+        # VideoView post_save signal updates cached_views and watch ratio.
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -494,7 +430,7 @@ class VideoShareRecordView(APIView):
         """Absolute share URL — uses model property if available, else builds it."""
         if hasattr(video, 'share_url') and video.share_url:
             return video.share_url
-        return f"https://connectdial.app/shorts/{video.pk}/"
+        return f"https://api.connectdial.com/shorts/{video.pk}/"
 
     @staticmethod
     def _og_title(video) -> str:
@@ -521,7 +457,7 @@ class VideoShareRecordView(APIView):
         serializer.is_valid(raise_exception=True)
         share = serializer.save(user=request.user, video=video)
 
-        ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') + 1)
+        # VideoShare post_save signal updates cached_shares.
         video.refresh_from_db(fields=['cached_shares'])
 
         share_url   = self._share_url(video)
@@ -536,17 +472,17 @@ class VideoShareRecordView(APIView):
             'og_title':       og_title,
             'og_description': og_desc,
             'thumbnail_url': (
-                request.build_absolute_uri(video.thumbnail.url)
+                build_media_url(video.thumbnail, request)
                 if video.thumbnail else None
             ),
         }
 
         if platform == 'whatsapp':
-            text = build_whatsapp_share_text(video)
+            text = build_whatsapp_share_text(video, share_url)
             payload['text']         = text
             payload['whatsapp_url'] = f"https://wa.me/?text={quote(text)}"
         elif platform == 'telegram':
-            text = build_telegram_share_text(video)
+            text = build_telegram_share_text(video, share_url)
             payload['text']         = text
             payload['telegram_url'] = (
                 f"https://t.me/share/url?url={quote(share_url)}"
@@ -572,12 +508,11 @@ class VideoReshareView(APIView):
         ).first()
 
         if existing:
-            existing.delete()
-            ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') - 1)
+            existing.delete()  # post_delete signal decrements cached_shares
             return Response({'reshared': False}, status=status.HTTP_200_OK)
 
         VideoShare.objects.create(user=request.user, video=video, platform='reshare')
-        ShortVideo.objects.filter(pk=pk).update(cached_shares=F('cached_shares') + 1)
+        # post_save signal increments cached_shares
         return Response({'reshared': True}, status=status.HTTP_201_CREATED)
 
 
@@ -651,7 +586,7 @@ class VideoCommentListCreateView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         comment = serializer.save(author=request.user, video=video)
-        ShortVideo.objects.filter(pk=pk).update(cached_comments=F('cached_comments') + 1)
+        # VideoComment post_save signal increments cached_comments.
 
         # Re-fetch with related data so the response has full author/supporting_info
         comment = (
@@ -753,9 +688,7 @@ class CommentDetailView(APIView):
 
     def delete(self, request, pk):
         comment = self._get_own_comment(request, pk)
-        video_pk = comment.video_id
-        comment.delete()
-        ShortVideo.objects.filter(pk=video_pk).update(cached_comments=F('cached_comments') - 1)
+        comment.delete()  # post_delete signal decrements cached_comments
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

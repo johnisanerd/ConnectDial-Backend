@@ -24,15 +24,22 @@ ALLOWED_HOSTS = [
     '10.199.198.201',
     '10.199.198.22',
     'api.dataforgeprism.com',
+    'api.connectdial.com',
     '16.16.95.218',          
 ]
 
 AUTH_USER_MODEL = 'users.User'
 SITE_ID = 1
 
-GOOGLE_CLIENT_ID         = os.getenv('GOOGLE_CLIENT_ID')
-GOOGLE_ANDROID_CLIENT_ID = os.getenv('GOOGLE_ANDROID_CLIENT_ID', '')  
-GOOGLE_IOS_CLIENT_ID     = os.getenv('GOOGLE_IOS_CLIENT_ID', '')      
+GOOGLE_CLIENT_ID = os.getenv(
+    'GOOGLE_CLIENT_ID',
+    '597689072930-lf6o7j50lqv8ro2qc4lluq06gribo16h.apps.googleusercontent.com',
+)
+GOOGLE_ANDROID_CLIENT_ID = os.getenv(
+    'GOOGLE_ANDROID_CLIENT_ID',
+    '597689072930-67d9a06t10l30gi1rdtm5o0lr7sb2g06.apps.googleusercontent.com',
+)
+GOOGLE_IOS_CLIENT_ID = os.getenv('GOOGLE_IOS_CLIENT_ID', '')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -115,6 +122,7 @@ AWS_S3_ENDPOINT_URL = os.getenv('AWS_S3_ENDPOINT_URL', 'http://minio:9000')
 AWS_S3_FILE_OVERWRITE = False
 AWS_QUERYSTRING_AUTH = False
 AWS_S3_CUSTOM_DOMAIN = os.getenv('AWS_S3_CUSTOM_DOMAIN')
+PUBLIC_API_BASE_URL = os.getenv('PUBLIC_API_BASE_URL', 'https://api.connectdial.com').rstrip('/')
 
 STORAGES = {
     "default": {
@@ -125,10 +133,10 @@ STORAGES = {
     },
 }
 
-if AWS_S3_CUSTOM_DOMAIN:
-    MEDIA_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/{AWS_STORAGE_BUCKET_NAME}/"
-else:
-    MEDIA_URL = f"{AWS_S3_ENDPOINT_URL}/{AWS_STORAGE_BUCKET_NAME}/"
+# Never expose the Docker-only MinIO hostname to clients. Public media is
+# served through the HTTPS API proxy, while Django/Celery continue using the
+# internal MinIO endpoint for object storage operations.
+MEDIA_URL = f"{PUBLIC_API_BASE_URL}/api/media/"
 # ======================
 # TEMPLATES
 # ======================
@@ -156,6 +164,7 @@ CORS_ALLOWED_ORIGINS = [
     'https://16.16.95.218',
     'http://api.dataforgeprism.com',
     'https://api.dataforgeprism.com',
+    'https://api.connectdial.com',
 ]
 CORS_ALLOW_CREDENTIALS = True
 
@@ -164,6 +173,7 @@ CSRF_TRUSTED_ORIGINS = [
     'https://16.16.95.218',
     'http://api.dataforgeprism.com',
     'https://api.dataforgeprism.com',
+    'https://api.connectdial.com',
 ]
 
 # ======================
@@ -191,7 +201,7 @@ SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
 SOCIALACCOUNT_PROVIDERS = {
     'google': {
         'APP': {
-            'client_id': os.getenv('GOOGLE_CLIENT_ID'),
+            'client_id': GOOGLE_CLIENT_ID,
             'secret':    os.getenv('GOOGLE_CLIENT_SECRET'),
             'key':       '',
         },
@@ -242,8 +252,8 @@ REST_AUTH = {
 # DRF SPECTACULAR
 # ======================
 SPECTACULAR_SETTINGS = {
-    'TITLE':                'ConnectDial API',
-    'DESCRIPTION':          'ConnectDial Backend API Documentation',
+    'TITLE':                'SportTribe API',
+    'DESCRIPTION':          'SportTribe Backend API Documentation',
     'VERSION':              '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'COMPONENT_SPLIT_REQUEST': True,
@@ -410,7 +420,7 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 # ======================
 # APP NAME
 # ======================
-APP_NAME = 'ConnectDial'
+APP_NAME = 'SportTribe'
 
 # ======================
 # CACHES — Redis

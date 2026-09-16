@@ -3,9 +3,11 @@
 import re
 
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
+from connectdial.media import build_media_url
 
 from .models import (
     CommentMention,
@@ -26,17 +28,7 @@ _MENTION_RE = re.compile(r'@([\w.]+)')
 # ─────────────────────────────────────────────────────────────
 
 def _build_url(request, file_field):
-
-    if not file_field:
-        return None
-
-    try:
-        url = file_field.url
-    except Exception:
-        return None
-
-    return request.build_absolute_uri(url) if request else url
-
+    return build_media_url(file_field, request)
 
 def _author_dict(user, request):
 
@@ -385,31 +377,15 @@ class ShortVideoSerializer(
         return _author_dict(obj.author, request)
 
     def get_video_url(self, obj):
-        # ── Highlightly-imported video ────────────────────────────────────
-        # Check caption for firebase_url or external_url embedded by importer
+        # Highlightly-imported videos may already live on a trusted external CDN.
         highlight_url = _extract_highlight_url(obj.caption)
         if highlight_url:
             return highlight_url
 
-        # ── Normal locally uploaded video ─────────────────────────────────
-        request = self.context.get('request')
-
-        path = f"/api/videos/shorts/{obj.pk}/stream/"
-
-        token = None
-        if request and request.auth:
-            if hasattr(request.auth, 'key'):
-                token = request.auth.key
-            elif isinstance(request.auth, str):
-                token = request.auth
-
-        if token:
-            path = f"{path}?token={token}"
-
-        return (
-            request.build_absolute_uri(path)
-            if request else path
-        )
+        # Normal uploads always use the public HTTPS API domain. The stream
+        # endpoint proxies private MinIO and supports HTTP byte ranges.
+        base = settings.PUBLIC_API_BASE_URL.rstrip('/')
+        return f"{base}/api/videos/shorts/{obj.pk}/stream/"
 
     def get_thumbnail_url(self, obj):
 

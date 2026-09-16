@@ -76,7 +76,7 @@ logger = logging.getLogger(__name__)
 
 PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.connectmobile.app&pcampaignid=web_share"
 APP_SCHEME     = "connectdial"
-APP_DOMAIN     = "https://api.dataforgeprism.com"
+APP_DOMAIN     = "https://api.connectdial.com"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -834,17 +834,17 @@ class ShareRedirectView(View):
     content="width=device-width, initial-scale=1.0"
   />
 
-  <title>Opening ConnectDial…</title>
+  <title>Opening SportTribe…</title>
 
   <!-- Open Graph -->
   <meta
     property="og:title"
-    content="Open this {type_label} on ConnectDial"
+    content="Open this {type_label} on SportTribe"
   />
 
   <meta
     property="og:description"
-    content="View comments directly in the ConnectDial app."
+    content="View comments directly in the SportTribe app."
   />
 
   <meta
@@ -870,12 +870,12 @@ class ShareRedirectView(View):
 
   <meta
     name="twitter:title"
-    content="Open this {type_label} on ConnectDial"
+    content="Open this {type_label} on SportTribe"
   />
 
   <meta
     name="twitter:description"
-    content="View comments directly in the ConnectDial app."
+    content="View comments directly in the SportTribe app."
   />
 
   <meta
@@ -1004,7 +1004,7 @@ class ShareRedirectView(View):
   <h1>Opening Comments…</h1>
 
   <p>
-    If ConnectDial is installed,
+    If SportTribe is installed,
     comments will open automatically.
   </p>
 
@@ -1014,14 +1014,14 @@ class ShareRedirectView(View):
     class="btn primary"
   >
     <span class="spinner"></span>
-    Open in ConnectDial
+    Open in SportTribe
   </a>
 
   <a
     href="{PLAY_STORE_URL}"
     class="btn secondary"
   >
-    Download ConnectDial
+    Download SportTribe
   </a>
 
   <script>

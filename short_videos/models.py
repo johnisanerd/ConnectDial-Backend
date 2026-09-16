@@ -25,7 +25,9 @@ class ShortVideo(models.Model):
 
     STATUS_CHOICES = [
         ('draft', 'Draft'),
+        ('processing', 'Processing'),
         ('published', 'Published'),
+        ('failed', 'Failed'),
         ('rejected', 'Rejected'),
         ('banned', 'Banned'),
     ]
