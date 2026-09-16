@@ -110,33 +110,49 @@ DATABASES = {
     }
 }
 # ======================
-# STATIC & MEDIA — MinIO (S3 Compatible Storage)
+# STATIC & MEDIA — Firebase Storage / Google Cloud Storage
 # ======================
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-AWS_STORAGE_BUCKET_NAME = os.getenv('AWS_STORAGE_BUCKET_NAME', 'connectdial-media')
-AWS_S3_ENDPOINT_URL = os.getenv('AWS_S3_ENDPOINT_URL', 'http://minio:9000')
-
-AWS_S3_FILE_OVERWRITE = False
-AWS_QUERYSTRING_AUTH = False
-AWS_S3_CUSTOM_DOMAIN = os.getenv('AWS_S3_CUSTOM_DOMAIN')
 PUBLIC_API_BASE_URL = os.getenv('PUBLIC_API_BASE_URL', 'https://api.connectdial.com').rstrip('/')
+
+# Firebase/GCS is the permanent media store. Keep the service-account JSON
+# outside Git and outside the mobile application; mount it into web/Celery.
+FIREBASE_CREDENTIALS_PATH = os.getenv(
+    'FIREBASE_CREDENTIALS_PATH',
+    str(BASE_DIR / 'firebase-service-account.json'),
+)
+GS_BUCKET_NAME = os.getenv(
+    'GS_BUCKET_NAME',
+    'agrieldo-bc336.firebasestorage.app',
+)
+FIREBASE_SIGNED_URL_TTL_SECONDS = int(
+    os.getenv('FIREBASE_SIGNED_URL_TTL_SECONDS', '21600')
+)
 
 STORAGES = {
     "default": {
-        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage"
+        "BACKEND": "connectdial.firebase_storage.FirebaseMediaStorage"
     },
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
     },
 }
 
-# Never expose the Docker-only MinIO hostname to clients. Public media is
-# served through the HTTPS API proxy, while Django/Celery continue using the
-# internal MinIO endpoint for object storage operations.
+# Compatibility path for old app builds. New serializers return signed GCS
+# URLs directly; /api/media/<key> redirects to a fresh signed URL.
 MEDIA_URL = f"{PUBLIC_API_BASE_URL}/api/media/"
+
+# ======================
+# LEGACY MINIO — migration/rollback only
+# ======================
+# Do not use these settings for new uploads. They remain only so the
+# migrate_to_firebase command can copy existing objects without deleting them.
+AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_STORAGE_BUCKET_NAME = os.getenv('AWS_STORAGE_BUCKET_NAME', 'connectdial-media')
+AWS_S3_ENDPOINT_URL = os.getenv('AWS_S3_ENDPOINT_URL', 'http://minio:9000')
+AWS_S3_REGION_NAME = os.getenv('AWS_S3_REGION_NAME')
 # ======================
 # TEMPLATES
 # ======================

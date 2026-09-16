@@ -3,7 +3,6 @@
 import re
 
 from django.contrib.auth import get_user_model
-from django.conf import settings
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
@@ -377,15 +376,17 @@ class ShortVideoSerializer(
         return _author_dict(obj.author, request)
 
     def get_video_url(self, obj):
-        # Highlightly-imported videos may already live on a trusted external CDN.
+        # Highlightly records that could not be downloaded may still point to
+        # an external provider. Firebase-backed records use their FileField.
+        if obj.video and getattr(obj.video, 'name', None):
+            request = self.context.get('request')
+            return _build_url(request, obj.video)
+
         highlight_url = _extract_highlight_url(obj.caption)
         if highlight_url:
             return highlight_url
 
-        # Normal uploads always use the public HTTPS API domain. The stream
-        # endpoint proxies private MinIO and supports HTTP byte ranges.
-        base = settings.PUBLIC_API_BASE_URL.rstrip('/')
-        return f"{base}/api/videos/shorts/{obj.pk}/stream/"
+        return None
 
     def get_thumbnail_url(self, obj):
 

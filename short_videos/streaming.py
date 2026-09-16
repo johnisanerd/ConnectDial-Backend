@@ -1,19 +1,18 @@
 """Streaming and share helpers for SportTribe short videos."""
 
-from urllib.parse import quote
-
+from django.http import HttpResponseRedirect
 from rest_framework import status
 from rest_framework.response import Response
 
-from connectdial.media import storage_object_response
+from connectdial.media import build_media_url
 
 
 def stream_video_response(request, video_instance):
-    """Stream a ShortVideo/FileField through the public API with Range support.
+    """Legacy stream endpoint that redirects to Firebase/GCS.
 
-    The MinIO endpoint is private to Docker, so clients must never be redirected
-    to ``http://minio:9000``. ``storage_object_response`` reads the object from
-    MinIO server-side and preserves native video Range requests (206 responses).
+    Current serializers return the signed storage URL directly so native video
+    players can use Google Cloud Storage byte-range support without Django in
+    the media data path. This endpoint remains for older application builds.
     """
     video_file = getattr(video_instance, 'video', video_instance)
 
@@ -23,7 +22,13 @@ def stream_video_response(request, video_instance):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    return storage_object_response(request, video_file.name)
+    url = build_media_url(video_file, request)
+    if not url:
+        return Response(
+            {'detail': 'Video file is unavailable.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return HttpResponseRedirect(url)
 
 
 def build_whatsapp_share_text(video, share_url: str) -> str:
@@ -62,5 +67,5 @@ def build_telegram_share_text(video, share_url: str) -> str:
         text += f"🏆 {league_team}\n"
     if caption:
         text += f"📝 {caption}\n"
-    text += f'▶️ <a href="{share_url}">Watch on SportTribe</a>'
+    text += f'<a href="{share_url}">▶️ Watch on SportTribe</a>'
     return text

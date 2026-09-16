@@ -29,7 +29,7 @@ media_url = getattr(settings, 'MEDIA_URL', 'NOT SET')
 print(f"MEDIA_URL: {media_url}")
 gcs_bucket = getattr(settings, 'GS_BUCKET_NAME', 'NOT SET')
 print(f"GCS Bucket: {gcs_bucket}")
-gcs_key = getattr(settings, 'GS_KEY_PATH', 'NOT SET')
+gcs_key = getattr(settings, 'FIREBASE_CREDENTIALS_PATH', 'NOT SET')
 print(f"GCS Key path exists: {os.path.exists(gcs_key)}")
 
 print("\n" + "="*60)
@@ -94,7 +94,7 @@ try:
     from google.cloud import storage as gcs
     from google.oauth2 import service_account
     creds = service_account.Credentials.from_service_account_file(
-        settings.GS_KEY_PATH,
+        settings.FIREBASE_CREDENTIALS_PATH,
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
     client = gcs.Client(credentials=creds, project=creds.project_id)

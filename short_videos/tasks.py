@@ -43,7 +43,7 @@ def process_short_video(self, video_pk):
         instance.save(update_fields=['status'])
 
         # Copy remote/local storage object to a temporary file. This works for
-        # MinIO/S3 and avoids FieldFile.path, which only exists on local disk.
+        # remote object storage and avoids FieldFile.path, which only exists on local disk.
         suffix = os.path.splitext(instance.video.name)[1] or ".mp4"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_input:
             temp_input_path = temp_input.name
@@ -80,7 +80,7 @@ def process_short_video(self, video_pk):
         instance.save()
 
         # Remove the original upload if processing stored the final video under
-        # a different object key. Avoid leaving large orphaned MinIO objects.
+        # a different object key. Avoid leaving large orphaned storage objects.
         if old_video_name and old_video_name != instance.video.name:
             try:
                 default_storage.delete(old_video_name)

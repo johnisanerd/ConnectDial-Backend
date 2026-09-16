@@ -23,17 +23,12 @@ Logic:
   • All operations idempotent — safe to run multiple times
 """
 
-import requests
-from django.core.files import File
-from django.core.files.temp import NamedTemporaryFile
+from django.core.files.storage import default_storage
 from django.core.management.base import BaseCommand
 
 from leagues.models import League, Team
 
 
-BASE_LOGO_URL = (
-    "https://storage.googleapis.com/connect-c894b.firebasestorage.app/team_logos/"
-)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MASTER DATA
@@ -817,26 +812,24 @@ class Command(BaseCommand):
         last = model.objects.order_by('-id').values_list('id', flat=True).first()
         return (last or 0) + 1
 
-    # ── Logo downloader ───────────────────────────────────────────────────────
+    # ── Firebase logo attachment ───────────────────────────────────────────────
     def _download_logo(self, team, filename):
-        """
-        Downloads logo from Firebase storage and attaches it to the team.
-        Returns True on success, False on any failure (non-fatal).
-        Tries .png first; falls back to .jpeg if the server returns a non-200.
+        """Attach an existing private Firebase/GCS logo object to the team.
+
+        The seeder no longer downloads a public bucket URL. It references the
+        object key already present in the private Firebase bucket so API
+        serializers can issue signed URLs to clients.
         """
         for ext in [filename, filename.replace('.png', '.jpeg')]:
-            url = BASE_LOGO_URL + ext
+            key = f'team_logos/{ext}'
             try:
-                response = requests.get(url, timeout=10)
-                if response.status_code == 200:
-                    with NamedTemporaryFile(delete=True, suffix=f'.{ext.rsplit(".",1)[-1]}') as tmp:
-                        tmp.write(response.content)
-                        tmp.flush()
-                        team.logo.save(ext, File(tmp), save=True)
-                    self.stdout.write(f'       📸 Logo: {ext}')
+                if default_storage.exists(key):
+                    team.logo.name = key
+                    team.save(update_fields=['logo'])
+                    self.stdout.write(f'       📸 Firebase logo: {key}')
                     return True
             except Exception as exc:
                 self.stdout.write(
-                    self.style.WARNING(f'       ⚠️  Logo failed ({ext}): {exc}')
+                    self.style.WARNING(f'       ⚠️  Logo check failed ({key}): {exc}')
                 )
         return False

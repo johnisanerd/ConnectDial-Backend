@@ -215,7 +215,7 @@ class ShortVideoUploadView(generics.CreateAPIView):
         """Fallback when the Celery broker is temporarily unavailable.
 
         Uses the same storage-safe processing path as the Celery worker instead
-        of accessing ``FieldFile.path`` (which does not exist for MinIO/S3).
+        of accessing ``FieldFile.path`` (which does not exist for remote object storage).
         """
         try:
             from .tasks import process_short_video

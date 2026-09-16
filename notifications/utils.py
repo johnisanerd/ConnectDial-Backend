@@ -1,20 +1,13 @@
 # notifications/utils.py
-import firebase_admin
-from firebase_admin import credentials, messaging
-import os
-from django.conf import settings
+from firebase_admin import messaging
 
-# Initialize Firebase Admin SDK
-path_to_key = os.path.join(settings.BASE_DIR, 'firebase-service-account.json')
+from connectdial.firebase_admin import get_firebase_app
 
-if not firebase_admin._apps:
-    cred = credentials.Certificate(path_to_key)
-    firebase_admin.initialize_app(cred)
 
 def send_fcm_notification(token, title, body):
-    """
-    Sends a message to a specific device via FCM.
-    """
+    """Send a message to a specific device via FCM."""
+    get_firebase_app()
+
     message = messaging.Message(
         notification=messaging.Notification(
             title=title,
@@ -24,15 +17,14 @@ def send_fcm_notification(token, title, body):
         android=messaging.AndroidConfig(
             priority='high',
             notification=messaging.AndroidNotification(
-                channel_id='default_channel_id', # Matches your AndroidManifest.xml
-                click_action='OPEN_NOTIF_ACTIVITY', # Optional: for deep linking
+                channel_id='default_channel_id',
+                click_action='OPEN_NOTIF_ACTIVITY',
             ),
         ),
     )
 
     try:
-        response = messaging.send(message)
-        return response
-    except Exception as e:
-        print(f"❌ Firebase Error: {e}")
+        return messaging.send(message)
+    except Exception as exc:
+        print(f"❌ Firebase Error: {exc}")
         return None

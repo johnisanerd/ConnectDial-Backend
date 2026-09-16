@@ -48,6 +48,7 @@ services:
     volumes:
       - media_data:/app/media
       - static_data:/app/staticfiles
+      - ${FIREBASE_CREDENTIALS_HOST_PATH:-./firebase.json}:/app/firebase-service-account.json:ro
     ports:
       - "127.0.0.1:8000:8000"
     command: >
@@ -76,6 +77,7 @@ services:
     volumes:
       - media_data:/app/media
       - static_data:/app/staticfiles
+      - ${FIREBASE_CREDENTIALS_HOST_PATH:-./firebase.json}:/app/firebase-service-account.json:ro
     entrypoint: [] # 🚨 Overrides entrypoint.sh to stop concurrent migration locks
     command: >
       celery -A connectdial worker
@@ -98,6 +100,7 @@ services:
     volumes:
       - media_data:/app/media
       - static_data:/app/staticfiles
+      - ${FIREBASE_CREDENTIALS_HOST_PATH:-./firebase.json}:/app/firebase-service-account.json:ro
     entrypoint: [] # 🚨 Overrides entrypoint.sh to stop concurrent migration locks
     command: celery -A connectdial beat --loglevel=info
     depends_on:

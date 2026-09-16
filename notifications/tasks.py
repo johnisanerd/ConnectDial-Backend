@@ -1,23 +1,8 @@
-import os
-import firebase_admin
-from firebase_admin import credentials, messaging
 from celery import shared_task
-from django.conf import settings
 from django.contrib.auth import get_user_model
+from firebase_admin import messaging
 
-# ================== FIREBASE INITIALIZATION ==================
-cred_path = os.path.join(settings.BASE_DIR, 'firebase-service-account.json')
-
-try:
-    if os.path.exists(cred_path):
-        cred = credentials.Certificate(cred_path)
-        firebase_admin.initialize_app(cred)
-        print("✅ Firebase Admin SDK initialized successfully on server")
-    else:
-        print("⚠️ Firebase service account not found")
-except Exception as e:
-    print(f"❌ Firebase initialization failed: {e}")
-# ============================================================
+from connectdial.firebase_admin import get_firebase_app
 
 User = get_user_model()
 
@@ -55,6 +40,7 @@ def send_push_notification_task(user_id, title, message, notification_type=None,
         }
 
         # 🚀 4. Build the Firebase Message
+        get_firebase_app()
         message_obj = messaging.Message(
             notification=messaging.Notification(
                 title=title,

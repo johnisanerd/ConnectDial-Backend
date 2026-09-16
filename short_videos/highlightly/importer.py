@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from django.contrib.auth import get_user_model
+from django.core.files import File
 from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 from django.db import transaction
 
 logger = logging.getLogger(__name__)
@@ -45,36 +47,30 @@ class ImportResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIREBASE UPLOAD (Optimized: Direct Bucket Writes)
+# PRIVATE FIREBASE/GCS STORAGE
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _save_to_media_storage(local_path: str, destination_blob: str) -> str:
+    """Store a downloaded file through Django's Firebase media backend.
+
+    The deterministic key is returned and stored in the model field; no public
+    Firebase URL or public ACL is created. Existing orphaned objects from a
+    previously interrupted import are reused safely.
+    """
+    if default_storage.exists(destination_blob):
+        return destination_blob
+
+    with open(local_path, "rb") as source:
+        saved_name = default_storage.save(destination_blob, File(source))
+    return saved_name
+
+
 def _upload_to_firebase(local_path: str, destination_blob: str) -> str:
-    """Upload a local file to Firebase Storage and return its public URL."""
-    import firebase_admin
-    from firebase_admin import storage
-    from django.conf import settings
-
-    bucket_name = getattr(settings, "GS_BUCKET_NAME", "connect-c894b.firebasestorage.app")
-    bucket = storage.bucket(bucket_name)
-    blob = bucket.blob(destination_blob)
-
-    # Content type ensures mobile devices stream fluidly instead of triggering downloads
-    blob.upload_from_filename(local_path, content_type="video/mp4")
-    return blob.public_url
+    return _save_to_media_storage(local_path, destination_blob)
 
 
 def _upload_thumbnail_to_firebase(local_path: str, destination_blob: str) -> str:
-    """Upload a thumbnail image to Firebase Storage and return its public URL."""
-    import firebase_admin
-    from firebase_admin import storage
-    from django.conf import settings
-
-    bucket_name = getattr(settings, "GS_BUCKET_NAME", "connect-c894b.firebasestorage.app")
-    bucket = storage.bucket(bucket_name)
-    blob = bucket.blob(destination_blob)
-
-    blob.upload_from_filename(local_path, content_type="image/jpeg")
-    return blob.public_url
+    return _save_to_media_storage(local_path, destination_blob)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,8 +224,8 @@ def import_highlights(
         tmp_thumb_path = None
 
         # ✅ Scope Sanitization: Variables are reset to blank strings every single loop
-        firebase_video_url = ""
-        firebase_thumb_url = ""
+        firebase_video_key = ""
+        firebase_thumb_key = ""
 
         try:
             # ── 1. Pipeline Stage A: Run Network Calls OUTSIDE DB Transactions ──
@@ -240,7 +236,7 @@ def import_highlights(
                 if tmp_video_path:
                     firebase_video_blob = f"shorts/highlights/{highlight_id}.mp4"
                     try:
-                        firebase_video_url = _upload_to_firebase(tmp_video_path, firebase_video_blob)
+                        firebase_video_key = _upload_to_firebase(tmp_video_path, firebase_video_blob)
                     except Exception as fb_exc:
                         logger.warning("Firebase video push dropped for %s: %s", highlight_id, fb_exc)
 
@@ -249,7 +245,7 @@ def import_highlights(
                 if tmp_thumb_path:
                     firebase_thumb_blob = f"shorts/highlights/thumbs/{highlight_id}.jpg"
                     try:
-                        firebase_thumb_url = _upload_thumbnail_to_firebase(tmp_thumb_path, firebase_thumb_blob)
+                        firebase_thumb_key = _upload_thumbnail_to_firebase(tmp_thumb_path, firebase_thumb_blob)
                     except Exception as fb_exc:
                         logger.warning("Firebase thumbnail push dropped for %s: %s", highlight_id, fb_exc)
 
@@ -265,9 +261,7 @@ def import_highlights(
                 team = _resolve_team(match_data.get("homeTeam"))
                 caption = marker + "\n" + _build_caption(h)
 
-                if firebase_video_url:
-                    caption += f"\nfirebase_url:{firebase_video_url}"
-                elif video_url:
+                if not firebase_video_key and video_url:
                     caption += f"\nexternal_url:{video_url}"
 
                 instance = ShortVideo(
@@ -279,11 +273,11 @@ def import_highlights(
                 )
 
                 # ✅ Explicit Field Mapping: Assigning direct path strings back to file fields
-                if firebase_video_url:
-                    instance.video = f"shorts/highlights/{highlight_id}.mp4"
+                if firebase_video_key:
+                    instance.video = firebase_video_key
 
-                if firebase_thumb_url:
-                    instance.thumbnail = f"shorts/highlights/thumbs/{highlight_id}.jpg"
+                if firebase_thumb_key:
+                    instance.thumbnail = firebase_thumb_key
                 else:
                     # Disk fallback routine if bucket stream was bypassed or dropped
                     if tmp_thumb_path:
